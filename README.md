@@ -22,7 +22,11 @@ a `pxctl status`/`pxctl license list` exec into an existing Portworx pod.
    `status.consoleURL`) - the raw `clusterID` alone is a UUID and hard to
    recognize at a glance across multiple reports/clusters. These are display
    fields only (not health checks); if either object can't be read they fall
-   back to "unknown" rather than failing the play.
+   back to "unknown" rather than failing the play. If you'd rather target a
+   **channel** than a fixed version - including an EUS jump like 4.18 -> 4.20 -
+   set `upgrade_channel` instead of (or alongside) `upgrade_target_version`;
+   see [Upgrade channel resolution (EUS-aware)](#upgrade-channel-resolution-eus-aware)
+   below.
 2. **etcd cluster health** - per-pod readiness, `etcdctl endpoint health`
    round-trip latency, `endpoint status` (dbSize vs quota, leader/raft-term
    agreement across members, learner status), and active alarms (e.g.
@@ -162,8 +166,78 @@ Useful flags:
 - `-e acm_enabled=true -e acm_cascade_enabled=true` - also cascade the full
   check to every managed cluster with resolvable credentials, one separate
   report per cluster. Read [ACM notes](#acm-notes) before turning this on.
+- `-e upgrade_channel=eus` - resolve the next EUS target from the cluster's
+  current version instead of typing in a fixed `upgrade_target_version`. See
+  [Upgrade channel resolution (EUS-aware)](#upgrade-channel-resolution-eus-aware).
 
 All tunables, with comments, live in `group_vars/all.yml`.
+
+## Upgrade channel resolution (EUS-aware)
+
+`upgrade_target_version` (a fixed version like `4.17.14`) still works exactly
+as before and always wins if you set it. `upgrade_channel` is the
+alternative: point this at a **channel** instead, and the playbook resolves
+the actual target version (and, best-effort, the hop-by-hop path to get
+there) for you - correctly handling the EUS case, where the target isn't
+simply "+1 minor."
+
+```bash
+# Auto-derive the next EUS target from wherever the cluster currently is:
+#   current minor EVEN (already EUS)  -> +2  (e.g. 4.18 -> 4.20)
+#   current minor ODD                 -> +1  (e.g. 4.17 -> 4.18)
+ansible-playbook playbook.yml -e upgrade_channel=eus
+
+# Or a bare non-EUS prefix - always the next minor, regardless of parity:
+ansible-playbook playbook.yml -e upgrade_channel=stable
+ansible-playbook playbook.yml -e upgrade_channel=fast
+
+# Or skip auto-derivation and name the channel outright:
+ansible-playbook playbook.yml -e upgrade_channel=eus-4.20
+ansible-playbook playbook.yml -e upgrade_channel=stable-4.19
+
+# upgrade_target_version, if also set, overrides whatever upgrade_channel
+# resolves to - the resolved channel/path still appears in the report,
+# just marked as overridden:
+ansible-playbook playbook.yml -e upgrade_channel=eus -e upgrade_target_version=4.20.3
+```
+
+**Why the actual hop-by-hop path matters for EUS specifically**: there is no
+direct edge from one EUS (even) minor straight to the next in Cincinnati's
+update graph - e.g. going from 4.18 to 4.20 genuinely requires passing
+through a 4.19.z release first, which is exactly why an "EUS-to-EUS upgrade"
+is a two-step process even though it's marketed/labelled as one. This
+playbook doesn't hand-wave that: it queries the real Cincinnati update graph
+(the same data source `oc adm upgrade`, the OpenShift web console, the [Red
+Hat upgrade-graph lab](https://access.redhat.com/labs/ocpupgradegraph/update_path/),
+and community tools like
+[ctron.github.io/openshift-update-graph](https://ctron.github.io/openshift-update-graph/)
+all ultimately read from) via its public JSON API
+(`upgrade_graph_url`, default `https://api.openshift.com/api/upgrades_info/v1/graph`)
+and computes the real shortest path with a graph search - so the reported
+path always reflects an actual Cincinnati-endorsed route, intermediate hops
+included, not an assumption.
+
+**Disconnected/firewalled clusters**: the graph fetch is best-effort and
+*never fails the play*. If `upgrade_graph_url` isn't reachable from wherever
+this playbook runs (common when the cluster - or your bastion - has no
+direct internet egress), the report still shows the resolved channel name
+and target minor, just without a hop-by-hop path, plus a note to verify
+manually with `oc adm upgrade channel <channel>` + `oc adm upgrade` once
+that channel is set on the cluster. Point `upgrade_graph_url` at an internal
+OpenShift Update Service (OSUS) mirror if you run one - that's exactly what
+that variable is for.
+
+**What ends up in the report**: the resolved channel, whether it was
+auto-derived or given explicitly, the reasoning ("current 4.18 is already
+EUS - next EUS target is +2 -> 4.20"), the hop-by-hop path when the graph
+was reachable, and - if `upgrade_target_version` was also set - a note that
+it overrode the channel's resolved path. When `upgrade_channel` isn't set at
+all, none of this appears and behavior is identical to before this feature
+existed.
+
+Other related vars (`group_vars/all.yml`): `upgrade_graph_arch` (default
+`amd64`), `upgrade_path_validate_certs`, `upgrade_path_timeout` (seconds,
+default 15).
 
 ## etcd notes
 
@@ -407,6 +481,7 @@ group_vars/all.yml               every tunable, with comments
 inventory/hosts.yml               localhost - this talks to the API, not SSH
 tasks/00_facts.yml                 connection setup, findings collector
 tasks/10_clusterversion.yml
+tasks/11_upgrade_path.yml          upgrade_channel resolution (EUS-aware) + Cincinnati graph path
 tasks/15_etcd_health.yml
 tasks/20_nodes_mcp_matrix.yml
 tasks/30_clusteroperators.yml
@@ -424,3 +499,22 @@ templates/report.md.j2 / report.html.j2 / report_summary.html.j2
 extras/acm-policy-managed-serviceaccount-rbac.yaml   reference ACM Policy (see ACM notes) - not auto-applied
 tests/                             fixtures + offline unit/render tests
 ```
+
+## Version control
+
+This project is a git repository (`git log` to see its history). Every
+change from the point git was initialized onward gets its own commit with a
+real diff - `git log -p`, `git diff <rev>..<rev>`, or `git blame` on any file
+show exactly what changed and (in the commit message) why. `.gitignore`
+excludes everything generated by a run (`reports/`, the ACM cascade's
+`.acm-cascade-scratch/` credential scratch dir, `tests/preview_out/`,
+`__pycache__/`, `*.pyc`) so only the actual project source is tracked.
+
+If you're pulling this project into your own team's repo, either add it as a
+subtree/subdirectory of your existing repo (dropping its own `.git/` history,
+or preserving it with `git subtree add`/`git remote add + fetch` if you want
+both histories linked) or push this repo's history to a remote of your own
+(`git remote add origin <url> && git push -u origin main`) to keep it
+independent. Either way, treat this repo's own history (from initialization
+onward) as the record of how the playbook evolved - it's more precise than
+any changelog kept alongside it.
