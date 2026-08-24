@@ -1,0 +1,19 @@
+---
+# Reuses ocp_mcps fetched in 20_nodes_mcp_matrix.yml - no second API call needed.
+- name: Build MachineConfigPool report
+  ansible.builtin.set_fact:
+    mcp_report_data: "{{ ocp_mcps | mcp_report }}"
+
+- name: Append MachineConfigPool findings (non-OK only)
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'MachineConfigPool (' ~ item.name ~ ')',
+        'severity': item.severity,
+        'summary': item.name ~ ': machineCount=' ~ item.machine_count ~ ' ready=' ~ item.ready_machine_count
+                   ~ ' updated=' ~ item.updated_machine_count ~ ' unavailable=' ~ item.unavailable_machine_count
+                   ~ ' degraded=' ~ item.degraded_machine_count
+                   ~ (' - ' ~ (item.messages | join(' | ')) if item.messages else ''),
+      }] }}"
+  loop: "{{ mcp_report_data | rejectattr('severity', 'equalto', 'OK') | list }}"
+  loop_control:
+    label: "{{ item.name }}"

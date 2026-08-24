@@ -1,0 +1,345 @@
+---
+# Advanced Cluster Management (ACM) - hub health, managed-cluster inventory,
+# and (opt-in) cascading the entire health check to every managed cluster as
+# its own separate report.
+#
+# Three layers, each a bigger commitment than the last:
+#   1. Hub health (acm_enabled: true)       - read-only: MultiClusterHub CR status.
+#   2. Managed-cluster inventory            - read-only: ManagedCluster conditions
+#                                              (Available/Accepted/Joined) for every
+#                                              cluster ACM knows about.
+#   3. Cascade (acm_cascade_enabled: true)  - resolves credentials per cluster and
+#                                              re-runs this whole playbook against
+#                                              each one as a subprocess, writing a
+#                                              separate report per cluster. Can
+#                                              optionally WRITE a ManagedServiceAccount
+#                                              CR to the hub (acm_create_managed_service_accounts:
+#                                              true) - the one place this project
+#                                              mutates a cluster. See README.md.
+#
+# Always seed empty defaults first so the templates never hit an undefined
+# var, regardless of which layers are enabled/reachable.
+- name: Seed ACM report variables
+  ansible.builtin.set_fact:
+    acm_mch_report: []
+    acm_managed_clusters_report: []
+    acm_cascade_targets: []
+    acm_cascade_results: []
+    acm_crds_present: false
+
+- name: ACM checks (only when acm_enabled)
+  when: acm_enabled | bool
+  block:
+    - name: Check whether the ACM CRDs are installed on this cluster
+      kubernetes.core.k8s_info:
+        kind: CustomResourceDefinition
+        name: "{{ item }}"
+      register: _acm_crd_check
+      loop:
+        - managedclusters.cluster.open-cluster-management.io
+        - multiclusterhubs.operator.open-cluster-management.io
+      loop_control:
+        label: "{{ item }}"
+      ignore_errors: true
+
+    - name: Record whether ACM is actually installed here
+      ansible.builtin.set_fact:
+        acm_crds_present: "{{ _acm_crd_check.results | selectattr('resources', 'defined') | selectattr('resources', 'ne', []) | list | length == 2 }}"
+
+    - name: ACM hub + managed-cluster checks (only when the CRDs are actually present)
+      when: acm_crds_present
+      block:
+        - name: Get MultiClusterHub
+          kubernetes.core.k8s_info:
+            api_version: operator.open-cluster-management.io/v1
+            kind: MultiClusterHub
+            namespace: "{{ acm_namespace }}"
+          register: _acm_mch_raw
+          ignore_errors: true
+
+        - name: Build the MultiClusterHub health report
+          ansible.builtin.set_fact:
+            acm_mch_report: "{{ (_acm_mch_raw.resources | default([])) | acm_hub_report }}"
+
+        - name: Append findings for an unhealthy ACM hub
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'ACM hub (' ~ item.name ~ ')',
+                'severity': item.severity,
+                'summary': 'phase=' ~ item.phase ~ (' - ' ~ item.message if item.message else ''),
+              }] }}"
+          loop: "{{ acm_mch_report | rejectattr('severity', 'equalto', 'OK') | list }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Get ManagedCluster inventory (cluster-scoped)
+          kubernetes.core.k8s_info:
+            api_version: cluster.open-cluster-management.io/v1
+            kind: ManagedCluster
+          register: _acm_managed_clusters_raw
+          ignore_errors: true
+
+        - name: Build the managed-cluster inventory report
+          ansible.builtin.set_fact:
+            acm_managed_clusters_report: "{{ (_acm_managed_clusters_raw.resources | default([])) | acm_managed_cluster_report }}"
+
+        - name: Append findings for unhealthy/not-yet-joined managed clusters
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'ACM managed cluster (' ~ item.name ~ ')',
+                'severity': item.severity,
+                'summary': 'available=' ~ item.available_status ~ ' accepted=' ~ item.accepted ~ ' joined=' ~ item.joined,
+              }] }}"
+          loop: "{{ acm_managed_clusters_report | rejectattr('severity', 'equalto', 'OK') | list }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        # -----------------------------------------------------------------
+        # Cascade: resolve credentials + re-run this playbook per cluster
+        # -----------------------------------------------------------------
+        - name: Cascade the health check to every managed cluster (only when acm_cascade_enabled)
+          when: acm_cascade_enabled | bool
+          block:
+            - name: Look for a Hive-provisioned admin-kubeconfig secret, one lookup per managed cluster
+              kubernetes.core.k8s_info:
+                kind: Secret
+                namespace: "{{ item }}"
+                name: "{{ item }}-admin-kubeconfig"
+              loop: "{{ acm_managed_clusters_report | map(attribute='name') | list }}"
+              register: _acm_hive_secret_results
+              ignore_errors: true
+              # NOTE: `.item` on each result below is the plain cluster-name string
+              # (that's what this loop iterates over) - acm_resolve_cascade_targets
+              # in the filter plugin expects exactly that shape for both this and
+              # the ManagedServiceAccount secret lookups below, so keep them in sync
+              # if either loop ever changes.
+
+            - name: Determine which available, non-excluded clusters still need a ManagedServiceAccount lookup
+              ansible.builtin.set_fact:
+                _acm_msa_candidates: >-
+                  {{ acm_managed_clusters_report
+                     | selectattr('available', 'equalto', true)
+                     | rejectattr('name', 'in', acm_exclude_clusters)
+                     | rejectattr('name', 'in', (_acm_hive_secret_results.results
+                                                  | selectattr('resources', 'defined')
+                                                  | selectattr('resources', 'ne', [])
+                                                  | map(attribute='item') | list))
+                     | list }}
+              when: acm_use_managed_service_account | bool
+
+            - name: Create a ManagedServiceAccount for each candidate cluster that doesn't already have one (opt-in write)
+              kubernetes.core.k8s:
+                state: present
+                definition:
+                  apiVersion: authentication.open-cluster-management.io/v1beta1
+                  kind: ManagedServiceAccount
+                  metadata:
+                    name: "{{ acm_msa_name }}"
+                    namespace: "{{ item.name }}"
+                  spec:
+                    rotation:
+                      enabled: true
+                      validity: "{{ acm_msa_token_validity }}"
+              loop: "{{ _acm_msa_candidates | default([]) }}"
+              loop_control:
+                label: "{{ item.name }}"
+              when:
+                - acm_use_managed_service_account | bool
+                - acm_create_managed_service_accounts | bool
+              ignore_errors: true
+
+            - name: Poll each candidate cluster for its ManagedServiceAccount token Secret
+              # Delegated to a per-cluster included task file so retries/until apply
+              # cleanly to ONE secret lookup at a time - combining `until`/`retries`
+              # directly on a task that also has a top-level `loop:` has inconsistent
+              # behavior across Ansible versions, so this avoids relying on that.
+              ansible.builtin.include_tasks: 85a_acm_wait_msa_secret.yml
+              loop: "{{ _acm_msa_candidates | default([]) }}"
+              loop_control:
+                label: "{{ acm_msa_wait_item.name }}"
+                loop_var: acm_msa_wait_item
+              when: acm_use_managed_service_account | bool
+
+            - name: Resolve final cascade targets (credentials + reachability, per cluster)
+              ansible.builtin.set_fact:
+                acm_cascade_targets: "{{ (_acm_managed_clusters_raw.resources | default([])) | acm_resolve_cascade_targets(
+                    acm_managed_clusters_report,
+                    _acm_hive_secret_results.results | default([]),
+                    _acm_msa_secret_results | default([]),
+                    acm_exclude_clusters, acm_prefer_hive_kubeconfig, acm_use_cluster_proxy, acm_cluster_proxy_base_url) }}"
+              # _acm_hive_secret_results comes from `register:` on a plain looped module
+              # task (so `.results` is the per-item list); _acm_msa_secret_results is
+              # instead accumulated by hand across include_tasks calls in
+              # 85a_acm_wait_msa_secret.yml, so it's ALREADY the per-item list - no
+              # `.results` on it.
+
+            - name: Append a WARNING finding for available clusters that couldn't be checked (no credentials)
+              ansible.builtin.set_fact:
+                findings: "{{ findings + [{
+                    'section': 'ACM cascade (' ~ item.name ~ ')',
+                    'severity': 'WARNING',
+                    'summary': 'not checked - ' ~ item.reason,
+                  }] }}"
+              loop: "{{ acm_cascade_targets | rejectattr('checked', 'equalto', true) | rejectattr('reason', 'search', 'excluded') | rejectattr('reason', 'search', 'not Available') | list }}"
+              loop_control:
+                label: "{{ item.name }}"
+
+            - name: Run the cascade for every cluster with resolved credentials
+              when: acm_cascade_targets | selectattr('checked', 'equalto', true) | list | length > 0
+              block:
+                - name: Create a scratch directory for per-cluster credentials and extra-vars files (cleaned up at the end)
+                  ansible.builtin.file:
+                    path: "{{ _acm_scratch_dir }}"
+                    state: directory
+                    mode: "0700"
+                  vars:
+                    _acm_scratch_dir: "{{ report_output_dir }}/.acm-cascade-scratch"
+                  delegate_to: localhost
+
+                - name: Write per-cluster kubeconfig files (kubeconfig-auth targets only)
+                  ansible.builtin.copy:
+                    content: "{{ item.kubeconfig_content }}"
+                    dest: "{{ report_output_dir }}/.acm-cascade-scratch/{{ item.name }}.kubeconfig"
+                    mode: "0600"
+                  loop: "{{ acm_cascade_targets | selectattr('checked', 'equalto', true) | selectattr('auth_method', 'equalto', 'kubeconfig') | list }}"
+                  loop_control:
+                    label: "{{ item.name }}"
+                  delegate_to: localhost
+                  no_log: "{{ not (acm_cascade_debug | default(false) | bool) }}"
+
+                # The child is a fresh `ansible-playbook` process - it does NOT inherit
+                # -e flags from the outer command line, only what's written into its
+                # own extra-vars file below. ansible_python_interpreter is the one that
+                # bites people in practice (pyenv/virtualenv setups where the
+                # `kubernetes`/`openshift` pip libraries live in a venv that isn't the
+                # interpreter Ansible would auto-discover), so it's forwarded
+                # unconditionally, using whatever this OUTER run actually resolved
+                # (inventory default, or your own -e override - either way, the same
+                # value the parent just proved works). acm_cascade_extra_vars (see
+                # group_vars/all.yml) is merged in last so it can add or override
+                # anything here, including the auto-forwarded interpreter.
+                #
+                # NOTE: the `_extra_vars` Jinja expression below is a single {{ ... }}
+                # block - Jinja expression syntax has no `#` comment form, so don't add
+                # inline comments inside it (only outside, like this one); a `#` inside
+                # `{{ }}` is a template syntax error that this task's `no_log: true`
+                # will then hide behind a "censored" message.
+                - name: Write per-cluster extra-vars files (one child ansible-playbook invocation per cluster)
+                  ansible.builtin.copy:
+                    content: "{{ _extra_vars | to_nice_json }}"
+                    dest: "{{ report_output_dir }}/.acm-cascade-scratch/{{ item.name }}.extravars.json"
+                    mode: "0600"
+                  loop: "{{ acm_cascade_targets | selectattr('checked', 'equalto', true) | list }}"
+                  loop_control:
+                    label: "{{ item.name }}"
+                    loop_var: item
+                  no_log: "{{ not (acm_cascade_debug | default(false) | bool) }}"
+                  vars:
+                    _report_basename: "ocp-preupgrade-health-{{ item.name }}-{{ report_timestamp }}"
+                    _extra_vars: >-
+                      {{
+                        {
+                          'ocp_auth_method': item.auth_method,
+                          'ocp_kubeconfig': (report_output_dir ~ '/.acm-cascade-scratch/' ~ item.name ~ '.kubeconfig') if item.auth_method == 'kubeconfig' else '',
+                          'ocp_api_host': item.host if item.auth_method == 'token' else '',
+                          'ocp_api_token': item.token if item.auth_method == 'token' else '',
+                          'ocp_validate_certs': acm_cascade_validate_certs,
+                          'upgrade_target_version': acm_cascade_upgrade_target_version,
+                          'report_output_dir': acm_cascade_report_dir,
+                          'report_basename': _report_basename,
+                          'fail_on_critical': acm_cascade_fail_on_critical,
+                          'acm_enabled': false,
+                          'ansible_python_interpreter': ansible_python_interpreter,
+                        } | combine(acm_cascade_extra_vars | default({}))
+                      }}
+                  delegate_to: localhost
+                  no_log: true
+
+                - name: Ensure the per-cluster report output directory exists
+                  ansible.builtin.file:
+                    path: "{{ acm_cascade_report_dir }}"
+                    state: directory
+                    mode: "0755"
+                  delegate_to: localhost
+
+                - name: Run the full health check against each managed cluster (sequential, one subprocess per cluster)
+                  ansible.builtin.command:
+                    argv:
+                      - ansible-playbook
+                      - "{{ playbook_dir }}/playbook.yml"
+                      - "-e"
+                      - "@{{ report_output_dir }}/.acm-cascade-scratch/{{ item.name }}.extravars.json"
+                    chdir: "{{ playbook_dir }}"
+                    # Explicit chdir so the child process reliably picks up this
+                    # project's ansible.cfg/collections regardless of the directory
+                    # the outer playbook happened to be invoked from.
+                  loop: "{{ acm_cascade_targets | selectattr('checked', 'equalto', true) | list }}"
+                  loop_control:
+                    label: "{{ item.name }}"
+                  register: _acm_cascade_runs
+                  changed_when: false
+                  ignore_errors: true
+                  delegate_to: localhost
+
+                - name: Read back each cluster's status.json (best-effort - a run that errored before rendering just won't have one)
+                  ansible.builtin.command:
+                    argv:
+                      - cat
+                      - "{{ acm_cascade_report_dir }}/ocp-preupgrade-health-{{ item.name }}-{{ report_timestamp }}.status.json"
+                  loop: "{{ acm_cascade_targets | selectattr('checked', 'equalto', true) | list }}"
+                  loop_control:
+                    label: "{{ item.name }}"
+                  register: _acm_status_cat
+                  changed_when: false
+                  failed_when: false
+                  delegate_to: localhost
+                  # Deliberately a fresh loop over acm_cascade_targets (not chained off
+                  # _acm_cascade_runs.results) - the status.json path only depends on the
+                  # cluster name + report_timestamp, so there's no need to thread results
+                  # through a second level of loop-item nesting to find it.
+
+                - name: Build the cascade results summary
+                  ansible.builtin.set_fact:
+                    acm_cascade_results: >-
+                      {{ acm_cascade_results + [
+                        (result.rc == 0)
+                        | ternary(
+                            (result.stdout | from_json),
+                            {'cluster_name': result.item.name, 'overall_status': 'UNKNOWN',
+                             'critical_count': 0, 'warning_count': 0, 'info_count': 0,
+                             'report_basename': 'ocp-preupgrade-health-' ~ result.item.name ~ '-' ~ report_timestamp,
+                             'note': 'this cluster did not produce a status file - check the "Run the full health check..." task output above for the real error'}
+                          )
+                      ] }}
+                  loop: "{{ _acm_status_cat.results | default([]) }}"
+                  loop_control:
+                    label: "{{ result.item.name }}"
+                    loop_var: result
+
+                - name: Append findings for cascaded clusters with CRITICAL results
+                  ansible.builtin.set_fact:
+                    findings: "{{ findings + [{
+                        'section': 'ACM cascade result (' ~ item.cluster_name ~ ')',
+                        'severity': 'CRITICAL',
+                        'summary': item.critical_count ~ ' CRITICAL finding(s) - see ' ~ item.report_basename ~ '.html',
+                      }] }}"
+                  loop: "{{ acm_cascade_results | selectattr('overall_status', 'equalto', 'CRITICAL') | list }}"
+                  loop_control:
+                    label: "{{ item.cluster_name }}"
+
+                - name: Append findings for cascaded clusters whose run didn't complete
+                  ansible.builtin.set_fact:
+                    findings: "{{ findings + [{
+                        'section': 'ACM cascade result (' ~ item.cluster_name ~ ')',
+                        'severity': 'WARNING',
+                        'summary': item.note | default('run did not complete'),
+                      }] }}"
+                  loop: "{{ acm_cascade_results | selectattr('overall_status', 'equalto', 'UNKNOWN') | list }}"
+                  loop_control:
+                    label: "{{ item.cluster_name }}"
+
+                - name: Clean up the credentials scratch directory
+                  ansible.builtin.file:
+                    path: "{{ report_output_dir }}/.acm-cascade-scratch"
+                    state: absent
+                  delegate_to: localhost

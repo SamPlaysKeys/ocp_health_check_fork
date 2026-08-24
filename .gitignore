@@ -1,0 +1,13 @@
+reports/*.md
+reports/*.html
+reports/*.status.json
+reports/**/*.md
+reports/**/*.html
+reports/**/*.status.json
+!reports/.gitkeep
+.acm-cascade-scratch/
+tests/preview_out/
+__pycache__/
+*.pyc
+.ansible/
+*.retry

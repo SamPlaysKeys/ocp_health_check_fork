@@ -1,0 +1,244 @@
+---
+# Portworx pre-upgrade checks.
+#
+# What this automates (read-only, via the Kubernetes/OpenShift API):
+#   - StorageCluster CR phase/conditions
+#   - StorageNode CR status for every node (one per hyperconverged PX node)
+#   - Portworx daemonset pod health + Stork scheduler pod health
+#   - Nodes still carrying px/service=stop|disabled labels (must be cleared pre-upgrade)
+#   - best-effort `pxctl status` / `pxctl license list` via exec, for a human to read
+#
+# What this DOES NOT fully automate (Portworx internals are opaque to us):
+#   - KVDB quorum/health detail, storage pool rebalance/resync-in-progress state,
+#     license expiry, and PX<->OCP compatibility-matrix validation.
+#   These are called out as manual checklist items in the report, with the
+#   pxctl output captured above so a human (or a Portworx-aware follow-up) can
+#   confirm them quickly. See:
+#     https://docs.portworx.com/portworx-enterprise/support-matrix/operator-openshift-upgrade-path
+#     https://docs.portworx.com/portworx-enterprise/platform/upgrade/upgrade-ocp
+- name: Seed Portworx report variables so the templates render even when disabled/skipped
+  ansible.builtin.set_fact:
+    px_storagecluster_list: []
+    px_sc_name: ""
+    px_sc_phase: ""
+    px_image: ""
+    px_storagenodes: []
+    pxctl_status_output: "(Portworx checks were skipped - portworx_enabled=false)"
+    pxctl_license_output: "(Portworx checks were skipped - portworx_enabled=false)"
+    portworx_manual_checklist: []
+
+- name: Portworx checks
+  when: portworx_enabled | bool
+  block:
+    - name: Discover StorageCluster CR(s)
+      kubernetes.core.k8s_info:
+        api_version: core.libopenstorage.org/v1
+        kind: StorageCluster
+        namespace: "{{ portworx_namespace }}"
+        name: "{{ portworx_storagecluster_name | default(omit) }}"
+      register: _px_sc_raw
+      ignore_errors: true
+
+    - name: Record whether Portworx is actually present
+      ansible.builtin.set_fact:
+        px_storagecluster_list: "{{ _px_sc_raw.resources | default([]) }}"
+
+    - name: Flag when Portworx is enabled in vars but no StorageCluster CR was found
+      ansible.builtin.set_fact:
+        findings: "{{ findings + [{
+            'section': 'Portworx',
+            'severity': 'WARNING',
+            'summary': 'portworx_enabled=true but no StorageCluster CR was found in namespace ' ~ portworx_namespace ~ ' - set portworx_enabled=false if this cluster does not run Portworx, or fix portworx_namespace/portworx_storagecluster_name.',
+          }] }}"
+      when: px_storagecluster_list | length == 0
+
+    - name: Portworx detail checks (only when a StorageCluster CR exists)
+      when: px_storagecluster_list | length > 0
+      block:
+        - name: Select the StorageCluster to report on
+          ansible.builtin.set_fact:
+            px_sc: "{{ px_storagecluster_list[0] }}"
+
+        - name: Warn if more than one StorageCluster CR was found
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'Portworx',
+                'severity': 'WARNING',
+                'summary': (px_storagecluster_list | length | string) ~ ' StorageCluster CRs found in ' ~ portworx_namespace ~ ' - reporting on ' ~ px_sc.metadata.name ~ ' only. Set portworx_storagecluster_name to pick a specific one.',
+              }] }}"
+          when: px_storagecluster_list | length > 1
+
+        - name: Extract StorageCluster status
+          ansible.builtin.set_fact:
+            px_sc_name: "{{ px_sc.metadata.name }}"
+            px_sc_phase: "{{ px_sc.status.phase | default('Unknown') }}"
+            px_sc_conditions: "{{ px_sc.status.conditions | default([]) }}"
+            px_image: "{{ px_sc.spec.image | default('unset') }}"
+            px_prometheus_enabled: "{{ px_sc.spec.monitoring.prometheus.enabled | default(false) }}"
+
+        - name: Append StorageCluster phase finding
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'Portworx StorageCluster (' ~ px_sc_name ~ ')',
+                'severity': 'OK' if px_sc_phase in ['Online', 'Running'] else 'CRITICAL',
+                'summary': px_sc_name ~ ' phase=' ~ px_sc_phase ~ ' image=' ~ px_image,
+              }] }}"
+
+        - name: Append any non-True StorageCluster conditions
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'Portworx StorageCluster (' ~ px_sc_name ~ ')',
+                'severity': 'WARNING',
+                'summary': item.type ~ '=' ~ item.status ~ (' - ' ~ item.message if item.message is defined else ''),
+              }] }}"
+          loop: "{{ px_sc_conditions }}"
+          loop_control:
+            label: "{{ item.type | default('condition') }}"
+          when: item.status is defined and item.status != 'True' and (item.type | default('')) not in ['']
+
+        - name: Get StorageNode CRs (one per Portworx-enabled node)
+          kubernetes.core.k8s_info:
+            api_version: core.libopenstorage.org/v1
+            kind: StorageNode
+            namespace: "{{ portworx_namespace }}"
+          register: _px_nodes_raw
+          ignore_errors: true
+
+        - name: Evaluate StorageNode health
+          ansible.builtin.set_fact:
+            px_storagenodes: "{{ _px_nodes_raw.resources | default([]) }}"
+
+        - name: Append StorageNode findings (non-Online only)
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'Portworx StorageNode (' ~ item.metadata.name ~ ')',
+                'severity': 'CRITICAL',
+                'summary': item.metadata.name ~ ' status=' ~ (item.status.phase | default(item.status.status) | default('Unknown')),
+              }] }}"
+          loop: "{{ px_storagenodes }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+          when: (item.status.phase | default(item.status.status) | default('Unknown')) not in ['Online', 'Running']
+
+        - name: Compare StorageNode count against cluster node count
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'Portworx StorageNode',
+                'severity': 'WARNING',
+                'summary': (px_storagenodes | length | string) ~ ' StorageNode objects vs ' ~ (ocp_nodes | default([]) | length | string) ~ ' Kubernetes Nodes - if Portworx is not meant to run on every node (e.g. storageless/compute-only nodes) this may be expected, otherwise investigate the gap.',
+              }] }}"
+          when: ocp_nodes is defined and px_storagenodes | length != (ocp_nodes | length)
+
+        - name: Find nodes still carrying px/service stop|disabled labels
+          ansible.builtin.set_fact:
+            px_service_flagged_nodes: "{{ ocp_nodes | default([]) | selectattr('metadata.labels', 'defined') | selectattr('metadata.labels.px/service', 'defined') | selectattr('metadata.labels.px/service', 'in', ['stop', 'disabled']) | map(attribute='metadata.name') | list }}"
+          when: ocp_nodes is defined
+
+        - name: Append finding for px/service stop|disabled labels
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'Portworx node labels',
+                'severity': 'WARNING',
+                'summary': 'Nodes with px/service set to stop or disabled must have that label removed before upgrading OpenShift (Portworx will not restart cleanly otherwise): ' ~ (px_service_flagged_nodes | join(', ')),
+              }] }}"
+          when: px_service_flagged_nodes is defined and px_service_flagged_nodes | length > 0
+
+        - name: Get Portworx daemonset pods
+          kubernetes.core.k8s_info:
+            kind: Pod
+            namespace: "{{ portworx_namespace }}"
+            label_selectors:
+              - "{{ portworx_pod_selector }}"
+          register: _px_pods_raw
+          ignore_errors: true
+
+        - name: Append findings for non-Running Portworx pods
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'Portworx pods',
+                'severity': 'CRITICAL',
+                'summary': item.metadata.name ~ ' on ' ~ (item.spec.nodeName | default('?')) ~ ' phase=' ~ item.status.phase,
+              }] }}"
+          loop: "{{ _px_pods_raw.resources | default([]) }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+          when: item.status.phase | default('Unknown') != 'Running'
+
+        - name: Get Stork scheduler pods
+          kubernetes.core.k8s_info:
+            kind: Pod
+            namespace: "{{ portworx_namespace }}"
+            label_selectors:
+              - "name=stork"
+          register: _stork_pods_raw
+          ignore_errors: true
+
+        - name: Append findings for non-Running Stork pods
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'Portworx Stork',
+                'severity': 'WARNING',
+                'summary': item.metadata.name ~ ' on ' ~ (item.spec.nodeName | default('?')) ~ ' phase=' ~ item.status.phase,
+              }] }}"
+          loop: "{{ _stork_pods_raw.resources | default([]) }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+          when: item.status.phase | default('Unknown') != 'Running'
+
+        - name: Note if Prometheus is still managed by Portworx (relevant for OCP 4.11 -> 4.12+ upgrades)
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'Portworx monitoring',
+                'severity': 'INFO',
+                'summary': 'StorageCluster spec.monitoring.prometheus.enabled=true - if upgrading from OCP 4.11 or earlier to 4.12+, Portworx docs recommend disabling the Portworx-managed Prometheus and using OpenShift-native monitoring instead.',
+              }] }}"
+          when: px_prometheus_enabled | bool
+
+        - name: Note that pxctl exec was skipped by configuration
+          ansible.builtin.set_fact:
+            pxctl_status_output: "(portworx_exec_enabled=false - skipped, review pxctl status manually)"
+            pxctl_license_output: "(portworx_exec_enabled=false - skipped, review pxctl license list manually)"
+          when: not (portworx_exec_enabled | bool)
+
+        - name: Best-effort - exec `pxctl status` and `pxctl license list` on a running Portworx pod
+          when: portworx_exec_enabled | bool
+          block:
+            - name: Pick a Running Portworx pod to exec into
+              ansible.builtin.set_fact:
+                px_exec_pod: "{{ (_px_pods_raw.resources | default([]) | selectattr('status.phase', 'equalto', 'Running') | map(attribute='metadata.name') | list | first) | default('') }}"
+
+            - name: pxctl status
+              kubernetes.core.k8s_exec:
+                namespace: "{{ portworx_namespace }}"
+                pod: "{{ px_exec_pod }}"
+                container: "{{ portworx_container }}"
+                command: pxctl status
+              register: _pxctl_status
+              when: px_exec_pod | length > 0
+              ignore_errors: true
+
+            - name: pxctl license list
+              kubernetes.core.k8s_exec:
+                namespace: "{{ portworx_namespace }}"
+                pod: "{{ px_exec_pod }}"
+                container: "{{ portworx_container }}"
+                command: pxctl license list
+              register: _pxctl_license
+              when: px_exec_pod | length > 0
+              ignore_errors: true
+
+            - name: Save raw pxctl output for the report (best-effort, not parsed)
+              ansible.builtin.set_fact:
+                pxctl_status_output: "{{ _pxctl_status.stdout | default('') if _pxctl_status is defined and not (_pxctl_status is failed) else '(pxctl status exec failed or was skipped - review manually)' }}"
+                pxctl_license_output: "{{ _pxctl_license.stdout | default('') if _pxctl_license is defined and not (_pxctl_license is failed) else '(pxctl license list exec failed or was skipped - review manually)' }}"
+
+        - name: Manual checklist notes (cannot be safely automated from here)
+          ansible.builtin.set_fact:
+            portworx_manual_checklist:
+              - "Confirm the installed Portworx Enterprise / Operator version supports your upgrade_target_version in the official compatibility matrix: https://docs.portworx.com/portworx-enterprise/support-matrix/operator-openshift-upgrade-path"
+              - "Portworx recommends upgrading Portworx itself to a version that supports the target OCP release BEFORE upgrading OpenShift."
+              - "Review the captured `pxctl status` output above for KVDB health, storage pool state (no pools 'Offline'/'In Maintenance'), and any ongoing resync/rebalance operations - do not upgrade while one is in progress."
+              - "Review the captured `pxctl license list` output above for license validity/expiry."
+              - "No node or pool should be under maintenance mode (`pxctl service pool show`, `pxctl cluster list`) before the upgrade starts."
+              - "Run the Portworx `pxfslib`/kernel-module-dependency update job at least once beforehand so kernel module dependencies for the new OCP node kernel are pre-staged (see Portworx OCP upgrade guide)."
+              - "Take a fresh cloudsnap/backup of critical volumes before starting the OpenShift upgrade, as an extra safety net."

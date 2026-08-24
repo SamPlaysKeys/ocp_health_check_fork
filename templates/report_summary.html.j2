@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OCP Pre-Upgrade Summary - {{ cluster_id_short }}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /* Scoped, self-contained widget styles - safe to <iframe> or inline-embed. */
+  .ocp-health-widget { --bg:#fff; --text:#1c2430; --muted:#5b6675; --border:#e2e6ec;
+    --ok:#1a7f37; --ok-bg:#e6f6ea; --warn:#9a6700; --warn-bg:#fff6e5; --crit:#b3261e; --crit-bg:#fdeceb;
+    font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--text);
+    border:1px solid var(--border); border-radius:12px; padding:16px 18px; max-width:480px; }
+  @media (prefers-color-scheme: dark) {
+    .ocp-health-widget { --bg:#1a1f27; --text:#e6e9ef; --muted:#9aa4b2; --border:#2b323d;
+      --ok:#5fd685; --ok-bg:#0f2a18; --warn:#f2c14e; --warn-bg:#332608; --crit:#ff8b82; --crit-bg:#3a1210; }
+  }
+  .ocp-health-widget * { box-sizing:border-box; }
+  .ocp-health-widget h3 { margin:0 0 2px; font-size:1rem; }
+  .ocp-health-widget .sub { color:var(--muted); font-size:.78rem; margin-bottom:12px; }
+  .ocp-health-widget .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:.76rem; font-weight:700; }
+  .ocp-health-widget .OK { color:var(--ok); background:var(--ok-bg); }
+  .ocp-health-widget .WARNING { color:var(--warn); background:var(--warn-bg); }
+  .ocp-health-widget .CRITICAL { color:var(--crit); background:var(--crit-bg); }
+  .ocp-health-widget .row { display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--border); font-size:.85rem; }
+  .ocp-health-widget .row:last-of-type { border-bottom:none; }
+  .ocp-health-widget .counts { display:flex; gap:14px; margin-top:10px; }
+  .ocp-health-widget .counts div { font-size:.8rem; }
+  .ocp-health-widget .counts b { font-size:1.1rem; display:block; }
+  .ocp-health-widget ul { margin:10px 0 0; padding-left:18px; font-size:.8rem; color:var(--muted); }
+</style>
+</head>
+<body style="margin:0; padding:12px; background:transparent;">
+<div class="ocp-health-widget">
+  <h3>OpenShift {{ current_version }} &middot; pre-upgrade check</h3>
+  <div class="sub">{{ (cluster_name ~ ' (' ~ cluster_id_short ~ ')') if cluster_name != 'unknown' else cluster_id_short }} &middot; generated {{ report_generated_at }}</div>
+  {% if cluster_console_url | length > 0 %}
+  <div class="row"><span>Console</span><span><a href="{{ cluster_console_url }}" style="color:inherit;">{{ cluster_console_url | truncate(40) }}</a></span></div>
+  {% endif %}
+
+  <div class="row">
+    <span>Overall status</span>
+    <span class="badge {{ overall_status }}">{{ overall_status }}</span>
+  </div>
+  {% if upgrade_target_version | length > 0 %}
+  <div class="row"><span>Target version</span><span>{{ upgrade_target_version }}</span></div>
+  {% endif %}
+  {% if acm_enabled and acm_crds_present %}
+  <div class="row"><span>ACM managed clusters</span><span>{{ acm_managed_clusters_report | length }}{{ ' (' ~ (acm_cascade_results | selectattr('overall_status', 'equalto', 'CRITICAL') | list | length | string) ~ ' critical)' if acm_cascade_enabled and (acm_cascade_results | selectattr('overall_status', 'equalto', 'CRITICAL') | list | length > 0) else '' }}</span></div>
+  {% endif %}
+
+  <div class="counts">
+    <div><b style="color:var(--crit)">{{ critical_findings | length }}</b>critical</div>
+    <div><b style="color:var(--warn)">{{ warning_findings | length }}</b>warning</div>
+    <div><b>{{ info_findings | length }}</b>info</div>
+  </div>
+
+  {% if critical_findings | length > 0 %}
+  <ul>
+    {% for f in critical_findings[:5] %}<li>{{ f.section }}: {{ f.summary | truncate(90) }}</li>{% endfor %}
+    {% if critical_findings | length > 5 %}<li>&hellip; and {{ critical_findings | length - 5 }} more in the full report</li>{% endif %}
+  </ul>
+  {% endif %}
+</div>
+</body>
+</html>

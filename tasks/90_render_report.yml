@@ -1,0 +1,74 @@
+---
+- name: Compute overall findings summary
+  ansible.builtin.set_fact:
+    critical_findings: "{{ findings | selectattr('severity', 'equalto', 'CRITICAL') | list }}"
+    warning_findings: "{{ findings | selectattr('severity', 'equalto', 'WARNING') | list }}"
+    info_findings: "{{ findings | selectattr('severity', 'equalto', 'INFO') | list }}"
+
+- name: Set overall cluster readiness status
+  ansible.builtin.set_fact:
+    overall_status: >-
+      {{ 'CRITICAL' if critical_findings | length > 0
+         else ('WARNING' if warning_findings | length > 0 else 'OK') }}
+
+- name: Render Markdown report (git-friendly)
+  ansible.builtin.template:
+    src: report.md.j2
+    dest: "{{ report_output_dir }}/{{ report_basename }}.md"
+    mode: "0644"
+  delegate_to: localhost
+
+- name: Render full HTML report (open in any browser)
+  ansible.builtin.template:
+    src: report.html.j2
+    dest: "{{ report_output_dir }}/{{ report_basename }}.html"
+    mode: "0644"
+  delegate_to: localhost
+
+- name: Render embeddable HTML summary (iframe/inline widget)
+  ansible.builtin.template:
+    src: report_summary.html.j2
+    dest: "{{ report_output_dir }}/{{ report_basename }}.summary.html"
+    mode: "0644"
+  delegate_to: localhost
+
+- name: Write a small machine-readable status file alongside the reports
+  # Lets other automation (e.g. the ACM cascade run in tasks/85_acm.yml,
+  # which shells out to this whole playbook once per managed cluster) read
+  # back the outcome without parsing Markdown/HTML - nothing else in this
+  # project depends on it, so it's safe to ignore if you don't need it.
+  ansible.builtin.copy:
+    dest: "{{ report_output_dir }}/{{ report_basename }}.status.json"
+    mode: "0644"
+    content: "{{ {
+        'cluster_id': cluster_id,
+        'cluster_name': cluster_name,
+        'current_version': current_version,
+        'overall_status': overall_status,
+        'critical_count': critical_findings | length,
+        'warning_count': warning_findings | length,
+        'info_count': info_findings | length,
+        'report_generated_at': report_generated_at,
+        'report_basename': report_basename,
+      } | to_nice_json }}"
+  delegate_to: localhost
+
+- name: Console summary
+  ansible.builtin.debug:
+    msg:
+      - "================================================================"
+      - "OpenShift pre-upgrade health check - cluster {{ cluster_id_short }} ({{ current_version }})"
+      - "Overall status: {{ overall_status }}"
+      - "Findings: {{ critical_findings | length }} CRITICAL, {{ warning_findings | length }} WARNING, {{ info_findings | length }} INFO"
+      - "Reports written to:"
+      - "  {{ report_output_dir }}/{{ report_basename }}.md"
+      - "  {{ report_output_dir }}/{{ report_basename }}.html"
+      - "  {{ report_output_dir }}/{{ report_basename }}.summary.html"
+      - "================================================================"
+
+- name: Fail the play if critical findings were recorded and fail_on_critical is set
+  ansible.builtin.fail:
+    msg: >-
+      {{ critical_findings | length }} CRITICAL finding(s) recorded - see the report for details.
+      Set fail_on_critical=false to have this playbook always exit 0.
+  when: fail_on_critical | bool and critical_findings | length > 0

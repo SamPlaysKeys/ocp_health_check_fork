@@ -1,0 +1,23 @@
+---
+- name: Get ClusterOperators
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: ClusterOperator
+  register: _co_raw
+
+- name: Build ClusterOperator report
+  ansible.builtin.set_fact:
+    co_report_data: "{{ (_co_raw.resources | default([])) | co_report }}"
+
+- name: Append ClusterOperator findings (non-OK only)
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'ClusterOperator (' ~ item.name ~ ')',
+        'severity': item.severity,
+        'summary': item.name ~ ' Available=' ~ item.available ~ ' Progressing=' ~ item.progressing
+                   ~ ' Degraded=' ~ item.degraded ~ ' Upgradeable=' ~ item.upgradeable
+                   ~ (' - ' ~ (item.messages | join(' | ')) if item.messages else ''),
+      }] }}"
+  loop: "{{ co_report_data | rejectattr('severity', 'equalto', 'OK') | list }}"
+  loop_control:
+    label: "{{ item.name }}"

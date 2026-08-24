@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OCP Pre-Upgrade Health Check - {{ cluster_id_short }}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #f7f8fa; --panel: #ffffff; --text: #1c2430; --muted: #5b6675; --border: #e2e6ec;
+    --ok: #1a7f37; --ok-bg: #e6f6ea;
+    --warn: #9a6700; --warn-bg: #fff6e5;
+    --crit: #b3261e; --crit-bg: #fdeceb;
+    --info: #385ac2; --info-bg: #eaf0fd;
+    --accent: #cc0000;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151a; --panel:#1a1f27; --text:#e6e9ef; --muted:#9aa4b2; --border:#2b323d;
+      --ok:#5fd685; --ok-bg:#0f2a18; --warn:#f2c14e; --warn-bg:#332608; --crit:#ff8b82; --crit-bg:#3a1210;
+      --info:#8fb2ff; --info-bg:#131c33; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height:1.5; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 60px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  h2 { font-size: 1.15rem; margin: 36px 0 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .sub { color: var(--muted); font-size: .9rem; margin-bottom: 20px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap: 14px; margin-bottom: 8px; }
+  .stat { background: var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+  .stat .n { font-size: 1.6rem; font-weight:700; }
+  .stat .l { color: var(--muted); font-size: .8rem; text-transform:uppercase; letter-spacing:.04em; }
+  .badge { display:inline-block; padding: 2px 10px; border-radius: 999px; font-size:.78rem; font-weight:700; letter-spacing:.02em; }
+  .OK { color: var(--ok); background: var(--ok-bg); }
+  .WARNING { color: var(--warn); background: var(--warn-bg); }
+  .CRITICAL { color: var(--crit); background: var(--crit-bg); }
+  .INFO { color: var(--info); background: var(--info-bg); }
+  .UNKNOWN { color: var(--muted); background: rgba(127,127,127,.15); }
+  table { width:100%; border-collapse: collapse; font-size: .88rem; }
+  th, td { text-align:left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight:600; font-size:.76rem; text-transform:uppercase; letter-spacing:.03em; }
+  tr:hover td { background: rgba(127,127,127,.06); }
+  .tblwrap { overflow-x:auto; border:1px solid var(--border); border-radius:10px; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; }
+  pre { background: var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; overflow-x:auto; white-space:pre-wrap; }
+  details { background: var(--panel); border:1px solid var(--border); border-radius:10px; padding: 10px 14px; margin: 10px 0; }
+  summary { cursor:pointer; font-weight:600; }
+  .note { color: var(--muted); font-size:.88rem; }
+  ul.checklist { list-style:none; padding-left:0; }
+  ul.checklist li::before { content:"\2610\0020"; }
+  footer { margin-top:40px; color:var(--muted); font-size:.78rem; text-align:center; }
+  .kv { display:grid; grid-template-columns: 160px 1fr; gap:6px 12px; font-size:.9rem; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  .kv code, .kv a { word-break: break-all; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>OpenShift Pre-Upgrade Health Check</h1>
+  <div class="sub">Generated {{ report_generated_at }} (UTC)</div>
+
+  <div class="panel">
+    <div class="kv">
+      <div>Cluster name</div><div>{{ cluster_name }}</div>
+      <div>Cluster ID</div><div><code>{{ cluster_id }}</code></div>
+      <div>API URL</div><div>{{ ('<code>' ~ cluster_api_url ~ '</code>') if cluster_api_url | length > 0 else '<span class="note">unknown</span>' }}</div>
+      <div>Console URL</div><div>{{ ('<a href="' ~ cluster_console_url ~ '">' ~ cluster_console_url ~ '</a>') if cluster_console_url | length > 0 else '<span class="note">unknown</span>' }}</div>
+      <div>Current version</div><div>{{ current_version }} (channel: {{ current_channel }})</div>
+      <div>Target version</div><div>{{ upgrade_target_version if upgrade_target_version | length > 0 else '<span class="note">not specified</span>' }}</div>
+      <div>Overall status</div><div><span class="badge {{ overall_status }}">{{ overall_status }}</span></div>
+    </div>
+  </div>
+
+  <div class="grid" style="margin-top:16px;">
+    <div class="stat"><div class="n" style="color:var(--crit)">{{ critical_findings | length }}</div><div class="l">Critical</div></div>
+    <div class="stat"><div class="n" style="color:var(--warn)">{{ warning_findings | length }}</div><div class="l">Warning</div></div>
+    <div class="stat"><div class="n" style="color:var(--info)">{{ info_findings | length }}</div><div class="l">Info</div></div>
+    <div class="stat"><div class="n">{{ (critical_findings | length) + (warning_findings | length) + (info_findings | length) }}</div><div class="l">Total findings</div></div>
+  </div>
+
+  {% if upgrade_target_version | length > 0 %}
+  <p class="note">Update path check: <code>{{ upgrade_target_version }}</code> is
+  {{ 'a recommended update.' if target_is_recommended | default(false) else ('a conditional update &mdash; review its risks before proceeding.' if target_is_conditional | default(false) else 'NOT currently listed in availableUpdates/conditionalUpdates &mdash; verify with <code>oc adm upgrade</code>.') }}</p>
+  {% endif %}
+  {% if upgrade_channel_resolution.channel is defined %}
+  <div class="panel" style="margin-top:8px;">
+    <p class="note" style="margin:0 0 6px;">
+      <b>Upgrade channel resolution</b> (<code>upgrade_channel: {{ upgrade_channel }}</code>{{ ' &mdash; auto-derived' if upgrade_channel_resolution.auto_derived else '' }}):
+      resolved to <code>{{ upgrade_channel_resolution.channel }}</code>, target <b>{{ upgrade_channel_resolution.target_major }}.{{ upgrade_channel_resolution.target_minor }}</b>{{ ' (EUS jump)' if upgrade_channel_resolution.is_eus_jump else '' }}.
+      {{ upgrade_channel_resolution.reasoning }}.
+    </p>
+    {% if upgrade_path_result.found | default(false) %}
+    <p class="note" style="margin:0;">Path: <code>{{ upgrade_path_result.hops | join(' &rarr; ') }}</code></p>
+    {% else %}
+    <p class="note" style="margin:0;">No hop-by-hop path available: {{ upgrade_path_result.reason | default('unknown') }}</p>
+    {% endif %}
+    {% if _upgrade_target_was_explicit | default(false) %}
+    <p class="note" style="margin:6px 0 0;"><i>Overridden: <code>upgrade_target_version={{ upgrade_target_version }}</code> was set explicitly and takes precedence over this channel's resolved path.</i></p>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% if upgrade_channel_resolution.error is defined %}
+  <p class="note"><b>Upgrade channel resolution error</b>: could not resolve <code>upgrade_channel: {{ upgrade_channel }}</code> &mdash; {{ upgrade_channel_resolution.error }}</p>
+  {% endif %}
+
+  <h2>1. Findings</h2>
+  {% if critical_findings | length == 0 and warning_findings | length == 0 %}
+  <p>No CRITICAL or WARNING findings. Cluster looks ready for upgrade based on the checks below.</p>
+  {% else %}
+  <div class="tblwrap"><table>
+    <tr><th>Severity</th><th>Section</th><th>Summary</th></tr>
+    {% for f in critical_findings + warning_findings %}
+    <tr><td><span class="badge {{ f.severity }}">{{ f.severity }}</span></td><td>{{ f.section }}</td><td>{{ f.summary }}</td></tr>
+    {% endfor %}
+  </table></div>
+  {% endif %}
+  {% if info_findings | length > 0 %}
+  <details><summary>INFO findings ({{ info_findings | length }})</summary>
+    <div class="tblwrap"><table>
+      <tr><th>Section</th><th>Summary</th></tr>
+      {% for f in info_findings %}<tr><td>{{ f.section }}</td><td>{{ f.summary }}</td></tr>{% endfor %}
+    </table></div>
+  </details>
+  {% endif %}
+
+  <h2>2. ClusterVersion</h2>
+  <p>Available=<b>{{ cv_available }}</b> &middot; Progressing=<b>{{ cv_progressing }}</b> &middot; Failing=<b>{{ cv_degraded }}</b> &middot; RetrievedUpdates=<b>{{ cv_retrieved_updates }}</b> &middot; last history state=<b>{{ cv_last_history_state }}</b></p>
+  <details><summary>Update history ({{ cv_history | length }} entries)</summary>
+    <div class="tblwrap"><table>
+      <tr><th>Version</th><th>State</th><th>Started</th><th>Completed</th><th>Verified</th></tr>
+      {% for h in cv_history %}
+      <tr><td>{{ h.version }}</td><td>{{ h.state }}</td><td>{{ h.startedTime | default('') }}</td><td>{{ h.completionTime | default('') }}</td><td>{{ h.verified | default('') }}</td></tr>
+      {% endfor %}
+    </table></div>
+  </details>
+
+  <h2>3. etcd cluster health</h2>
+  <p class="note">Read-only checks only &mdash; <code>etcdctl check perf</code> is deliberately not run (it generates write load and can grow the etcd DB; see the manual checklist below). &ldquo;IO health&rdquo; comes from <code>etcdctl endpoint health</code>&rsquo;s own round-trip timer (no extra load generated).</p>
+
+  <div class="tblwrap"><table>
+    <tr><th>Pod</th><th>Node</th><th>Phase</th><th>Ready</th><th>Status</th></tr>
+    {% for p in etcd_health_data.pods %}
+    <tr><td>{{ p.name }}</td><td>{{ p.node }}</td><td>{{ p.phase }}</td><td>{{ p.ready }}</td>
+      <td><span class="badge {{ p.severity }}">{{ p.severity }}</span></td></tr>
+    {% endfor %}
+  </table></div>
+
+  <div class="tblwrap" style="margin-top:12px;"><table>
+    <tr><th>Endpoint</th><th>Healthy</th><th>Round trip</th><th>Status</th></tr>
+    {% for h in etcd_health_data.health %}
+    <tr><td><code>{{ h.endpoint }}</code></td><td>{{ h.healthy }}</td>
+      <td>{{ (h.took_ms | string ~ 'ms') if h.took_ms is not none else 'n/a' }}{{ ' &mdash; ' ~ h.error if h.error else '' }}</td>
+      <td><span class="badge {{ h.severity }}">{{ h.severity }}</span></td></tr>
+    {% endfor %}
+  </table></div>
+
+  <div class="tblwrap" style="margin-top:12px;"><table>
+    <tr><th>Endpoint</th><th>Version</th><th>dbSize</th><th>dbSize in use</th><th>% of quota</th><th>Leader ID</th><th>Raft term</th><th>Learner</th><th>Status</th></tr>
+    {% for s in etcd_health_data.status %}
+    <tr><td><code>{{ s.endpoint }}</code></td><td>{{ s.version }}</td><td>{{ s.db_size_mb }}MB</td><td>{{ s.db_size_in_use_mb }}MB</td>
+      <td>{{ s.db_quota_pct }}%</td><td>{{ s.leader }}</td><td>{{ s.raft_term }}</td><td>{{ s.is_learner }}</td>
+      <td><span class="badge {{ s.severity }}">{{ s.severity }}</span></td></tr>
+    {% endfor %}
+  </table></div>
+
+  {% if etcd_health_data.cluster_findings | length > 0 %}
+  <ul>
+    {% for cf in etcd_health_data.cluster_findings %}
+    <li><span class="badge {{ cf.severity }}">{{ cf.severity }}</span> {{ cf.message }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if etcd_health_data.alarms | length > 0 %}
+  <p><b>Active etcd alarms:</b></p>
+  <ul>
+    {% for a in etcd_health_data.alarms %}
+    <li><span class="badge {{ a.severity }}">{{ a.severity }}</span> {{ a.raw }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <details><summary>etcdctl endpoint health (raw)</summary>
+    <pre>{{ etcdctl_health_raw }}</pre>
+  </details>
+
+  <details><summary>etcdctl endpoint status (raw)</summary>
+    <pre>{{ etcdctl_status_raw }}</pre>
+  </details>
+
+  <p><b>Manual checklist (verify before upgrading)</b></p>
+  <ul class="checklist">
+    {% for item in etcd_manual_checklist %}
+    <li>{{ item }}</li>
+    {% endfor %}
+  </ul>
+
+  <h2>4. Node &lt;-&gt; MachineConfigPool render matrix</h2>
+  <div class="tblwrap"><table>
+    <tr><th>Node</th><th>Roles</th><th>Ready</th><th>Pool</th><th>Node current</th><th>Node desired</th><th>Pool rendered</th><th>Status</th></tr>
+    {% for n in node_mcp_matrix_report %}
+    <tr><td>{{ n.node }}</td><td>{{ n.roles | join(',') }}</td><td>{{ n.ready }}</td><td>{{ n.pool }}</td>
+      <td><code>{{ n.node_current_config }}</code></td><td><code>{{ n.node_desired_config }}</code></td><td><code>{{ n.pool_rendered_config }}</code></td>
+      <td><span class="badge {{ n.severity }}">{{ n.status }}</span></td></tr>
+    {% endfor %}
+  </table></div>
+
+  <h2>5. ClusterOperators</h2>
+  <div class="tblwrap"><table>
+    <tr><th>Operator</th><th>Version</th><th>Available</th><th>Progressing</th><th>Degraded</th><th>Upgradeable</th><th>Status</th></tr>
+    {% for co in co_report_data %}
+    <tr><td>{{ co.name }}</td><td>{{ co.version }}</td><td>{{ co.available }}</td><td>{{ co.progressing }}</td><td>{{ co.degraded }}</td><td>{{ co.upgradeable }}</td>
+      <td><span class="badge {{ co.severity }}">{{ co.severity }}</span></td></tr>
+    {% endfor %}
+  </table></div>
+
+  <h2>6. MachineConfigPools</h2>
+  <div class="tblwrap"><table>
+    <tr><th>Pool</th><th>Machines</th><th>Ready</th><th>Updated</th><th>Unavailable</th><th>Degraded</th><th>Status</th></tr>
+    {% for p in mcp_report_data %}
+    <tr><td>{{ p.name }}</td><td>{{ p.machine_count }}</td><td>{{ p.ready_machine_count }}</td><td>{{ p.updated_machine_count }}</td><td>{{ p.unavailable_machine_count }}</td><td>{{ p.degraded_machine_count }}</td>
+      <td><span class="badge {{ p.severity }}">{{ p.severity }}</span></td></tr>
+    {% endfor %}
+  </table></div>
+
+  <h2>7. MachineSets vs Machines</h2>
+  {% if machineset_report_data | length == 0 %}
+  <p class="note">No MachineSets found (not applicable on this platform, e.g. UPI/bare-metal).</p>
+  {% else %}
+  <div class="tblwrap"><table>
+    <tr><th>MachineSet</th><th>Desired</th><th>Current</th><th>Ready</th><th>Available</th><th>Actual machines</th><th>Status</th></tr>
+    {% for m in machineset_report_data %}
+    <tr><td>{{ m.name }}</td><td>{{ m.desired }}</td><td>{{ m.current }}</td><td>{{ m.ready }}</td><td>{{ m.available }}</td><td>{{ m.actual_machine_count }}</td>
+      <td><span class="badge {{ m.severity }}">{{ m.severity }}</span></td></tr>
+    {% endfor %}
+  </table></div>
+  {% endif %}
+
+  <h2>8. Deprecated / removed API usage per namespace</h2>
+  {% if deprecated_api_data.namespace_matrix | length == 0 %}
+  <p class="note">No usage of APIs flagged with <code>status.removedInRelease</code> was observed in the last 24h.</p>
+  {% else %}
+  {% if deprecated_api_data.target_k8s_minor %}
+  <p class="note">Target Kubernetes minor for <code>{{ upgrade_target_version }}</code>: <b>{{ deprecated_api_data.target_k8s_minor }}</b> (CRITICAL = removed at or before this version).</p>
+  {% endif %}
+  <div class="tblwrap"><table>
+    <tr><th>Namespace</th><th>Resource</th><th>Removed in k8s</th><th>Requests/24h</th><th>Verbs</th><th>Callers</th><th>Severity</th></tr>
+    {% for ns in deprecated_api_data.namespace_matrix %}{% for r in ns.resources %}
+    <tr><td>{{ ns.namespace }}</td><td>{{ r.resource }}</td><td>{{ r.removedInRelease }}</td><td>{{ r.requestCount }}</td><td>{{ r.verbs | join(',') }}</td><td>{{ r.principals | join(', ') }}</td>
+      <td><span class="badge {{ r.severity }}">{{ r.severity }}</span></td></tr>
+    {% endfor %}{% endfor %}
+  </table></div>
+  {% endif %}
+
+  <h2>9. Resources stuck Terminating on a finalizer</h2>
+  <p class="note">Objects with a <code>deletionTimestamp</code> set but finalizers still attached - deletion was requested but something never finished cleaning up. Only flagged CRITICAL once stuck for at least {{ finalizer_scan_stuck_after_seconds }}s; briefly deleting is normal and not shown here.</p>
+  {% if finalizer_scan_include_crs %}
+  <p class="note">Dynamic CRD scan: {{ finalizer_stuck_data.crds_scanned }} CustomResourceDefinition kind(s) checked ({{ finalizer_stuck_data.crds_failed }} could not be listed and were skipped), plus Namespaces/PersistentVolumes/PersistentVolumeClaims.</p>
+  {% else %}
+  <p class="note">Dynamic CRD scan was skipped (<code>finalizer_scan_include_crs=false</code>) - only Namespaces/PersistentVolumes/PersistentVolumeClaims were checked.</p>
+  {% endif %}
+  {% set stuck_rows = finalizer_stuck_data.rows | selectattr('severity', 'equalto', 'CRITICAL') | list %}
+  {% if stuck_rows | length == 0 %}
+  <p class="note">No resources found stuck Terminating.</p>
+  {% else %}
+  <div class="tblwrap"><table>
+    <tr><th>Kind</th><th>Namespace/Name</th><th>Terminating for</th><th>Finalizers</th><th>CRD</th></tr>
+    {% for r in stuck_rows %}
+    <tr><td>{{ r.kind }}</td><td>{{ (r.namespace ~ '/') if r.namespace else '' }}{{ r.name }}</td><td><span class="badge CRITICAL">{{ r.age_human }}</span></td><td>{{ r.finalizers | join(', ') }}</td><td>{{ r.crd }}</td></tr>
+    {% endfor %}
+  </table></div>
+  {% endif %}
+
+  <h2>10. Portworx</h2>
+  {% if not portworx_enabled %}
+  <p class="note">Portworx checks skipped (portworx_enabled=false).</p>
+  {% elif px_storagecluster_list | length == 0 %}
+  <p class="note">No StorageCluster CR found in namespace <code>{{ portworx_namespace }}</code>.</p>
+  {% else %}
+  <div class="kv" style="margin-bottom:14px;">
+    <div>StorageCluster</div><div>{{ px_sc_name }}</div>
+    <div>Phase</div><div>{{ px_sc_phase }}</div>
+    <div>Image</div><div><code>{{ px_image }}</code></div>
+    <div>StorageNodes</div><div>{{ px_storagenodes | length }} reporting</div>
+  </div>
+  <div class="tblwrap"><table>
+    <tr><th>StorageNode</th><th>Status</th></tr>
+    {% for sn in px_storagenodes %}
+    <tr><td>{{ sn.metadata.name }}</td><td>{{ sn.status.phase | default(sn.status.status) | default('Unknown') }}</td></tr>
+    {% endfor %}
+  </table></div>
+
+  <details><summary>pxctl status (raw, best-effort)</summary><pre>{{ pxctl_status_output }}</pre></details>
+  <details><summary>pxctl license list (raw, best-effort)</summary><pre>{{ pxctl_license_output }}</pre></details>
+
+  <h3 style="margin-top:20px;">Manual checklist (verify before upgrading)</h3>
+  <ul class="checklist">
+    {% for item in portworx_manual_checklist %}<li>{{ item }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  <h2>11. OpenShift Virtualization (CNV/KubeVirt)</h2>
+  {% if not cnv_enabled %}
+  <p class="note">OpenShift Virtualization checks skipped (cnv_enabled=false).</p>
+  {% elif cnv_hco_list | length == 0 %}
+  <p class="note">No HyperConverged CR found in namespace <code>{{ cnv_namespace }}</code>.</p>
+  {% else %}
+  <h3>Component health</h3>
+  <div class="tblwrap"><table>
+    <tr><th>Component</th><th>Version</th><th>Available</th><th>Progressing</th><th>Degraded</th><th>Upgradeable</th><th>Status</th></tr>
+    {% for c in cnv_component_report %}
+    <tr><td>{{ c.name }}</td><td>{{ c.version }}</td><td>{{ c.available }}</td><td>{{ c.progressing }}</td><td>{{ c.degraded }}</td><td>{{ c.upgradeable }}</td>
+      <td><span class="badge {{ c.severity }}">{{ c.severity }}</span></td></tr>
+    {% endfor %}
+  </table></div>
+  <p class="note" style="margin-top:10px;">Outdated VMI workloads (still on an old virt-launcher): <b>{{ kv_outdated_count }}</b> &middot; workloadUpdateMethods: <code>{{ kv_update_methods }}</code></p>
+
+  <h3 style="margin-top:24px;">VM node-drain readiness</h3>
+  <p class="note">Every <code>Running</code> VirtualMachineInstance, checked against its <code>LiveMigratable</code> condition, <code>evictionStrategy</code>, and whether it has a CD-ROM/ISO disk attached (a known cause of migrations stalling even when reported migratable).</p>
+  {% if vmi_migration_report_data | length == 0 %}
+  <p class="note">No VirtualMachineInstances found.</p>
+  {% else %}
+  <div class="tblwrap"><table>
+    <tr><th>Namespace/Name</th><th>Node</th><th>Phase</th><th>Eviction strategy</th><th>Live migratable</th><th>CD-ROM disks</th><th>Status</th></tr>
+    {% for v in vmi_migration_report_data %}
+    <tr><td>{{ v.namespace }}/{{ v.name }}</td><td>{{ v.node }}</td><td>{{ v.phase }}</td><td>{{ v.eviction_strategy }}</td><td>{{ v.live_migratable }}</td><td>{{ v.cdrom_disks | join(',') }}</td>
+      <td><span class="badge {{ v.severity }}">{{ v.severity }}</span></td></tr>
+    {% endfor %}
+  </table></div>
+  {% for v in vmi_migration_report_data if v.severity in ['CRITICAL', 'WARNING'] %}
+  <p class="note"><b>{{ v.namespace }}/{{ v.name }}</b>: {{ v.reasons | join('; ') }}</p>
+  {% endfor %}
+  {% endif %}
+
+  <h3 style="margin-top:20px;">Manual checklist (verify before upgrading)</h3>
+  <ul class="checklist">
+    {% for item in cnv_manual_checklist %}<li>{{ item }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  <h2>12. Advanced Cluster Management (ACM)</h2>
+  {% if not acm_enabled %}
+  <p class="note">ACM checks skipped (acm_enabled=false).</p>
+  {% elif not acm_crds_present %}
+  <p class="note">ACM CRDs not found on this cluster - this doesn't look like an ACM hub.</p>
+  {% else %}
+  <h3>Hub health</h3>
+  <div class="tblwrap"><table>
+    <tr><th>MultiClusterHub</th><th>Namespace</th><th>Version</th><th>Phase</th><th>Status</th></tr>
+    {% for m in acm_mch_report %}
+    <tr><td>{{ m.name }}</td><td>{{ m.namespace }}</td><td>{{ m.version }}</td><td>{{ m.phase }}</td>
+      <td><span class="badge {{ m.severity }}">{{ m.severity }}</span></td></tr>
+    {% endfor %}
+  </table></div>
+  {% for m in acm_mch_report if m.severity != 'OK' and m.message %}
+  <p class="note"><b>{{ m.name }}</b>: {{ m.message }}</p>
+  {% endfor %}
+
+  <h3 style="margin-top:24px;">Managed cluster inventory</h3>
+  <p class="note">{{ acm_managed_clusters_report | length }} managed cluster(s) known to this hub.</p>
+  <div class="tblwrap"><table>
+    <tr><th>Cluster</th><th>Available</th><th>Accepted</th><th>Joined</th><th>OpenShift version</th><th>K8s version</th><th>Cloud</th><th>Status</th></tr>
+    {% for c in acm_managed_clusters_report %}
+    <tr><td>{{ c.name }}</td><td>{{ c.available_status }}</td><td>{{ c.accepted }}</td><td>{{ c.joined }}</td>
+      <td>{{ c.openshift_version }}</td><td>{{ c.kubernetes_version }}</td><td>{{ c.cloud }}</td>
+      <td><span class="badge {{ c.severity }}">{{ c.severity }}</span></td></tr>
+    {% endfor %}
+  </table></div>
+
+  {% if not acm_cascade_enabled %}
+  <p class="note" style="margin-top:16px;">Cascade run skipped (acm_cascade_enabled=false) - inventory/health only above. Set acm_cascade_enabled=true to run the full check against every managed cluster and generate a separate report for each.</p>
+  {% else %}
+  <h3 style="margin-top:24px;">Cascade: credential resolution</h3>
+  <p class="note">Which clusters the cascade could actually authenticate to, and how - see README.md's ACM section for the credential model (Hive admin-kubeconfig secret, or a ManagedServiceAccount token).</p>
+  <div class="tblwrap"><table>
+    <tr><th>Cluster</th><th>Checked</th><th>Method</th><th>Reason</th></tr>
+    {% for t in acm_cascade_targets %}
+    <tr><td>{{ t.name }}</td><td>{{ t.checked }}</td><td>{{ t.auth_method | default('-', true) }}</td><td>{{ t.reason }}</td></tr>
+    {% endfor %}
+  </table></div>
+
+  <h3 style="margin-top:24px;">Cascade: per-cluster results</h3>
+  {% if acm_cascade_results | length == 0 %}
+  <p class="note">No clusters had resolvable credentials - nothing was cascaded. See the credential-resolution table above.</p>
+  {% else %}
+  <div class="tblwrap"><table>
+    <tr><th>Cluster</th><th>Overall status</th><th>Critical</th><th>Warning</th><th>Info</th><th>Report</th></tr>
+    {% for r in acm_cascade_results %}
+    <tr><td>{{ r.cluster_name }}</td><td><span class="badge {{ r.overall_status }}">{{ r.overall_status }}</span></td>
+      <td>{{ r.critical_count }}</td><td>{{ r.warning_count }}</td><td>{{ r.info_count }}</td>
+      <td><code>{{ r.report_basename }}.html</code></td></tr>
+    {% endfor %}
+  </table></div>
+  {% for r in acm_cascade_results if r.note is defined %}
+  <p class="note"><b>{{ r.cluster_name }}</b>: {{ r.note }}</p>
+  {% endfor %}
+  <p class="note" style="margin-top:10px;">Per-cluster reports (.md/.html/.summary.html) are written to <code>{{ acm_cascade_report_dir }}/</code>.</p>
+  {% endif %}
+  {% endif %}
+  {% endif %}
+
+  <footer>Generated by the OpenShift pre-upgrade health check playbook &middot; cluster {{ cluster_id_short }} &middot; {{ report_generated_at }}</footer>
+</div>
+</body>
+</html>

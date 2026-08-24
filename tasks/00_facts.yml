@@ -1,0 +1,54 @@
+---
+- name: Validate auth method and required variables
+  ansible.builtin.assert:
+    that:
+      - ocp_auth_method in ['kubeconfig', 'token', 'password']
+      - (ocp_auth_method != 'token') or (ocp_api_host | length > 0 and ocp_api_token | length > 0)
+      - (ocp_auth_method != 'password') or (ocp_api_host | length > 0 and ocp_username | length > 0 and ocp_password | length > 0)
+    fail_msg: >-
+      ocp_auth_method={{ ocp_auth_method }} is missing its required variables.
+      token needs ocp_api_host + ocp_api_token; password needs ocp_api_host + ocp_username + ocp_password;
+      kubeconfig needs ocp_kubeconfig to point at a readable file.
+    quiet: true
+
+- name: Build raw connection parameters for the selected auth method
+  ansible.builtin.set_fact:
+    _raw_k8s_conn: "{{ _conn_by_method[ocp_auth_method] }}"
+  vars:
+    _conn_by_method:
+      kubeconfig:
+        kubeconfig: "{{ ocp_kubeconfig }}"
+        context: "{{ ocp_context }}"
+        validate_certs: "{{ ocp_validate_certs }}"
+        ca_cert: "{{ ocp_ca_cert }}"
+      token:
+        host: "{{ ocp_api_host }}"
+        api_key: "{{ ocp_api_token }}"
+        validate_certs: "{{ ocp_validate_certs }}"
+        ca_cert: "{{ ocp_ca_cert }}"
+      password:
+        host: "{{ ocp_api_host }}"
+        username: "{{ ocp_username }}"
+        password: "{{ ocp_password }}"
+        validate_certs: "{{ ocp_validate_certs }}"
+        ca_cert: "{{ ocp_ca_cert }}"
+
+- name: Strip empty connection parameters (so module defaults fall back sanely)
+  ansible.builtin.set_fact:
+    k8s_conn: "{{ _raw_k8s_conn | dict2items | rejectattr('value', 'equalto', '') | list | items2dict }}"
+
+- name: Record report timestamp
+  ansible.builtin.set_fact:
+    report_timestamp: "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+    report_generated_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+
+- name: Initialise findings collector
+  ansible.builtin.set_fact:
+    findings: []
+
+- name: Ensure report output directory exists
+  ansible.builtin.file:
+    path: "{{ report_output_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost

@@ -1,0 +1,372 @@
+# OpenShift Pre-Upgrade Health Check
+
+| | |
+|---|---|
+| **Cluster name** | {{ cluster_name }} |
+| **Cluster ID** | `{{ cluster_id }}` |
+| **API URL** | {{ ('`' ~ cluster_api_url ~ '`') if cluster_api_url | length > 0 else '_unknown_' }} |
+| **Console URL** | {{ cluster_console_url if cluster_console_url | length > 0 else '_unknown_' }} |
+| **Current version** | {{ current_version }} (channel: {{ current_channel }}) |
+| **Target version** | {{ upgrade_target_version if upgrade_target_version | length > 0 else '_not specified_' }} |
+| **Generated (UTC)** | {{ report_generated_at }} |
+| **Overall status** | **{{ overall_status }}** |
+| **Findings** | {{ critical_findings | length }} CRITICAL &nbsp;·&nbsp; {{ warning_findings | length }} WARNING &nbsp;·&nbsp; {{ info_findings | length }} INFO |
+
+{% if upgrade_target_version | length > 0 %}
+Update path check: `{{ upgrade_target_version }}` is
+{{ 'a recommended update' if target_is_recommended | default(false) else ('a conditional update (review its risks before proceeding)' if target_is_conditional | default(false) else 'NOT currently listed in availableUpdates/conditionalUpdates - verify with `oc adm upgrade`') }}.
+{% endif %}
+{% if upgrade_channel_resolution.channel is defined %}
+
+**Upgrade channel resolution** (`upgrade_channel: {{ upgrade_channel }}`{{ ' - auto-derived' if upgrade_channel_resolution.auto_derived else '' }}): resolved to `{{ upgrade_channel_resolution.channel }}`, target `{{ upgrade_channel_resolution.target_major }}.{{ upgrade_channel_resolution.target_minor }}`{{ ' (EUS jump)' if upgrade_channel_resolution.is_eus_jump else '' }}.
+{{ upgrade_channel_resolution.reasoning }}.
+{% if upgrade_path_result.found | default(false) %}
+Path: `{{ upgrade_path_result.hops | join('` &rarr; `') }}`
+{% else %}
+No hop-by-hop path available: {{ upgrade_path_result.reason | default('unknown') }}
+{% endif %}
+{% if _upgrade_target_was_explicit | default(false) %}
+_Overridden: `upgrade_target_version={{ upgrade_target_version }}` was set explicitly and takes precedence over this channel's resolved path._
+{% endif %}
+{% endif %}
+{% if upgrade_channel_resolution.error is defined %}
+
+**Upgrade channel resolution error**: could not resolve `upgrade_channel: {{ upgrade_channel }}` - {{ upgrade_channel_resolution.error }}
+{% endif %}
+
+## 1. Findings summary
+
+{% if critical_findings | length == 0 and warning_findings | length == 0 %}
+No CRITICAL or WARNING findings. Cluster looks ready for upgrade based on the checks below.
+{% else %}
+### CRITICAL ({{ critical_findings | length }})
+
+| Section | Summary |
+|---|---|
+{% for f in critical_findings %}
+| {{ f.section | md_cell }} | {{ f.summary | md_cell }} |
+{% endfor %}
+
+### WARNING ({{ warning_findings | length }})
+
+| Section | Summary |
+|---|---|
+{% for f in warning_findings %}
+| {{ f.section | md_cell }} | {{ f.summary | md_cell }} |
+{% endfor %}
+{% endif %}
+
+{% if info_findings | length > 0 %}
+### INFO ({{ info_findings | length }})
+
+| Section | Summary |
+|---|---|
+{% for f in info_findings %}
+| {{ f.section | md_cell }} | {{ f.summary | md_cell }} |
+{% endfor %}
+{% endif %}
+
+## 2. ClusterVersion
+
+- Available={{ cv_available }} · Progressing={{ cv_progressing }} · Failing={{ cv_degraded }} · RetrievedUpdates={{ cv_retrieved_updates }}
+- Last history entry state: **{{ cv_last_history_state }}**
+
+<details><summary>Update history ({{ cv_history | length }} entries)</summary>
+
+| Version | State | Started | Completed | Verified |
+|---|---|---|---|---|
+{% for h in cv_history %}
+| {{ h.version }} | {{ h.state }} | {{ h.startedTime | default('') }} | {{ h.completionTime | default('') }} | {{ h.verified | default('') }} |
+{% endfor %}
+
+</details>
+
+## 3. etcd cluster health
+
+Read-only checks only - `etcdctl check perf` is deliberately not run (it generates write load and can grow the etcd DB; see the manual checklist below). "IO health" comes from `etcdctl endpoint health`'s own round-trip timer (no extra load generated).
+
+| Pod | Node | Phase | Ready | Status |
+|---|---|---|---|---|
+{% for p in etcd_health_data.pods %}
+| {{ p.name }} | {{ p.node }} | {{ p.phase }} | {{ p.ready }} | **{{ p.severity }}** |
+{% endfor %}
+
+| Endpoint | Healthy | Round trip | Status |
+|---|---|---|---|
+{% for h in etcd_health_data.health %}
+| {{ h.endpoint }} | {{ h.healthy }} | {{ (h.took_ms | string ~ 'ms') if h.took_ms is not none else 'n/a' }}{{ ' - ' ~ h.error if h.error else '' }} | **{{ h.severity }}** |
+{% endfor %}
+
+| Endpoint | Version | dbSize | dbSize in use | % of quota | Leader ID | Raft term | Learner | Status |
+|---|---|---|---|---|---|---|---|---|
+{% for s in etcd_health_data.status %}
+| {{ s.endpoint }} | {{ s.version }} | {{ s.db_size_mb }}MB | {{ s.db_size_in_use_mb }}MB | {{ s.db_quota_pct }}% | {{ s.leader }} | {{ s.raft_term }} | {{ s.is_learner }} | **{{ s.severity }}** |
+{% endfor %}
+
+{% if etcd_health_data.cluster_findings | length > 0 %}
+{% for cf in etcd_health_data.cluster_findings %}
+- **{{ cf.severity }}**: {{ cf.message }}
+{% endfor %}
+{% endif %}
+
+{% if etcd_health_data.alarms | length > 0 %}
+**Active etcd alarms:**
+{% for a in etcd_health_data.alarms %}
+- {{ a.raw | md_cell }}
+{% endfor %}
+{% endif %}
+
+<details><summary>etcdctl endpoint health (raw)</summary>
+
+```
+{{ etcdctl_health_raw }}
+```
+
+</details>
+
+<details><summary>etcdctl endpoint status (raw)</summary>
+
+```
+{{ etcdctl_status_raw }}
+```
+
+</details>
+
+### Manual checklist (verify before upgrading)
+
+{% for item in etcd_manual_checklist %}
+- [ ] {{ item }}
+{% endfor %}
+
+## 4. Node <-> MachineConfigPool render matrix
+
+| Node | Roles | Ready | Pool | Node current config | Node desired config | Pool rendered config | Status |
+|---|---|---|---|---|---|---|---|
+{% for n in node_mcp_matrix_report %}
+| {{ n.node }} | {{ n.roles | join(',') }} | {{ n.ready }} | {{ n.pool }} | {{ n.node_current_config }} | {{ n.node_desired_config }} | {{ n.pool_rendered_config }} | **{{ n.status }}** |
+{% endfor %}
+
+## 5. ClusterOperators
+
+| Operator | Version | Available | Progressing | Degraded | Upgradeable | Status |
+|---|---|---|---|---|---|---|
+{% for co in co_report_data %}
+| {{ co.name }} | {{ co.version }} | {{ co.available }} | {{ co.progressing }} | {{ co.degraded }} | {{ co.upgradeable }} | **{{ co.severity }}** |
+{% endfor %}
+
+{% for co in co_report_data if co.severity != 'OK' and co.messages | length > 0 %}
+- **{{ co.name }}**: {{ co.messages | join(' | ') }}
+{% endfor %}
+
+## 6. MachineConfigPools
+
+| Pool | Machines | Ready | Updated | Unavailable | Degraded | Updated? | Updating? | Status |
+|---|---|---|---|---|---|---|---|---|
+{% for p in mcp_report_data %}
+| {{ p.name }} | {{ p.machine_count }} | {{ p.ready_machine_count }} | {{ p.updated_machine_count }} | {{ p.unavailable_machine_count }} | {{ p.degraded_machine_count }} | {{ p.updated }} | {{ p.updating }} | **{{ p.severity }}** |
+{% endfor %}
+
+## 7. MachineSets vs Machines
+
+{% if machineset_report_data | length == 0 %}
+_No MachineSets found (not applicable on this platform, e.g. UPI/bare-metal)._
+{% else %}
+| MachineSet | Desired | Current | Ready | Available | Actual machines | Phases | Status |
+|---|---|---|---|---|---|---|---|
+{% for m in machineset_report_data %}
+| {{ m.name }} | {{ m.desired }} | {{ m.current }} | {{ m.ready }} | {{ m.available }} | {{ m.actual_machine_count }} | {% for k, v in m.phase_counts.items() %}{{ k }}: {{ v }}{{ ', ' if not loop.last }}{% endfor %} | **{{ m.severity }}** |
+{% endfor %}
+
+{% for m in machineset_report_data if m.problem_machines | length > 0 %}
+- **{{ m.name }}** problem machines: {% for pm in m.problem_machines %}{{ pm.name }} ({{ pm.phase }}{{ ', node=' ~ pm.node if pm.node else '' }}){{ ', ' if not loop.last }}{% endfor %}
+
+{% endfor %}
+{% endif %}
+
+## 8. Deprecated / removed API usage per namespace
+
+{% if deprecated_api_data.namespace_matrix | length == 0 %}
+No usage of APIs flagged with `status.removedInRelease` was observed in the last 24h.
+{% else %}
+{% if deprecated_api_data.target_k8s_minor %}
+Target Kubernetes minor for `{{ upgrade_target_version }}`: **{{ deprecated_api_data.target_k8s_minor }}** (CRITICAL below = removed at or before this version).
+{% endif %}
+
+| Namespace | Resource | Removed in k8s | Requests/24h | Verbs | Callers | Severity |
+|---|---|---|---|---|---|---|
+{% for ns in deprecated_api_data.namespace_matrix %}
+{% for r in ns.resources %}
+| {{ ns.namespace }} | {{ r.resource }} | {{ r.removedInRelease }} | {{ r.requestCount }} | {{ r.verbs | join(',') }} | {{ r.principals | join(', ') }} | **{{ r.severity }}** |
+{% endfor %}
+{% endfor %}
+{% endif %}
+
+## 9. Resources stuck Terminating on a finalizer
+
+Objects with a `deletionTimestamp` set but finalizers still attached - deletion was requested but something never finished cleaning up. Only flagged CRITICAL once stuck for at least {{ finalizer_scan_stuck_after_seconds }}s; briefly deleting is normal and not shown here.
+
+{% if finalizer_scan_include_crs %}
+Dynamic CRD scan: {{ finalizer_stuck_data.crds_scanned }} CustomResourceDefinition kind(s) checked ({{ finalizer_stuck_data.crds_failed }} could not be listed and were skipped), plus Namespaces/PersistentVolumes/PersistentVolumeClaims.
+{% else %}
+Dynamic CRD scan was skipped (`finalizer_scan_include_crs=false`) - only Namespaces/PersistentVolumes/PersistentVolumeClaims were checked.
+{% endif %}
+
+{% set stuck_rows = finalizer_stuck_data.rows | selectattr('severity', 'equalto', 'CRITICAL') | list %}
+{% if stuck_rows | length == 0 %}
+No resources found stuck Terminating.
+{% else %}
+| Kind | Namespace/Name | Terminating for | Finalizers | CRD |
+|---|---|---|---|---|
+{% for r in stuck_rows %}
+| {{ r.kind }} | {{ (r.namespace ~ '/') if r.namespace else '' }}{{ r.name }} | {{ r.age_human }} | {{ r.finalizers | join(', ') | md_cell }} | {{ r.crd }} |
+{% endfor %}
+{% endif %}
+
+## 10. Portworx
+
+{% if not portworx_enabled %}
+_Portworx checks skipped (portworx_enabled=false)._
+{% elif px_storagecluster_list | length == 0 %}
+_No StorageCluster CR found in namespace `{{ portworx_namespace }}`._
+{% else %}
+- StorageCluster **{{ px_sc_name }}**: phase=`{{ px_sc_phase }}`, image=`{{ px_image }}`
+- StorageNodes: {{ px_storagenodes | length }} reporting
+
+| StorageNode | Status |
+|---|---|
+{% for sn in px_storagenodes %}
+| {{ sn.metadata.name }} | {{ sn.status.phase | default(sn.status.status) | default('Unknown') }} |
+{% endfor %}
+
+<details><summary>pxctl status (raw, best-effort)</summary>
+
+```
+{{ pxctl_status_output }}
+```
+
+</details>
+
+<details><summary>pxctl license list (raw, best-effort)</summary>
+
+```
+{{ pxctl_license_output }}
+```
+
+</details>
+
+### Manual checklist (verify before upgrading)
+
+{% for item in portworx_manual_checklist %}
+- [ ] {{ item }}
+{% endfor %}
+{% endif %}
+
+## 11. OpenShift Virtualization (CNV/KubeVirt)
+
+{% if not cnv_enabled %}
+_OpenShift Virtualization checks skipped (cnv_enabled=false)._
+{% elif cnv_hco_list | length == 0 %}
+_No HyperConverged CR found in namespace `{{ cnv_namespace }}`._
+{% else %}
+### Component health
+
+| Component | Version | Available | Progressing | Degraded | Upgradeable | Status |
+|---|---|---|---|---|---|---|
+{% for c in cnv_component_report %}
+| {{ c.name }} | {{ c.version }} | {{ c.available }} | {{ c.progressing }} | {{ c.degraded }} | {{ c.upgradeable }} | **{{ c.severity }}** |
+{% endfor %}
+
+{% for c in cnv_component_report if c.severity != 'OK' and c.messages | length > 0 %}
+- **{{ c.name }}**: {{ c.messages | join(' | ') }}
+{% endfor %}
+
+- Outdated VMI workloads (still on an old virt-launcher): **{{ kv_outdated_count }}**
+- KubeVirt workloadUpdateMethods: `{{ kv_update_methods }}`
+
+### VM node-drain readiness
+
+Every `Running` VirtualMachineInstance, checked against its `LiveMigratable` condition, `evictionStrategy`, and whether it has a CD-ROM/ISO disk attached (a known cause of migrations stalling even when reported migratable).
+
+{% if vmi_migration_report_data | length == 0 %}
+_No VirtualMachineInstances found._
+{% else %}
+| Namespace/Name | Node | Phase | Eviction strategy | Live migratable | CD-ROM disks | Status |
+|---|---|---|---|---|---|---|
+{% for v in vmi_migration_report_data %}
+| {{ v.namespace }}/{{ v.name }} | {{ v.node }} | {{ v.phase }} | {{ v.eviction_strategy }} | {{ v.live_migratable }} | {{ v.cdrom_disks | join(',') }} | **{{ v.severity }}** |
+{% endfor %}
+
+{% for v in vmi_migration_report_data if v.severity in ['CRITICAL', 'WARNING'] %}
+- **{{ v.namespace }}/{{ v.name }}**: {{ v.reasons | join('; ') }}
+{% endfor %}
+{% endif %}
+
+## 12. Advanced Cluster Management (ACM)
+
+{% if not acm_enabled %}
+_ACM checks skipped (acm_enabled=false)._
+{% elif not acm_crds_present %}
+_ACM CRDs not found on this cluster - this doesn't look like an ACM hub._
+{% else %}
+### Hub health
+
+| MultiClusterHub | Namespace | Version | Phase | Status |
+|---|---|---|---|---|
+{% for m in acm_mch_report %}
+| {{ m.name }} | {{ m.namespace }} | {{ m.version }} | {{ m.phase }} | **{{ m.severity }}** |
+{% endfor %}
+{% for m in acm_mch_report if m.severity != 'OK' and m.message %}
+- **{{ m.name }}**: {{ m.message | md_cell }}
+{% endfor %}
+
+### Managed cluster inventory
+
+{{ acm_managed_clusters_report | length }} managed cluster(s) known to this hub.
+
+| Cluster | Available | Accepted | Joined | OpenShift version | K8s version | Cloud | Status |
+|---|---|---|---|---|---|---|---|
+{% for c in acm_managed_clusters_report %}
+| {{ c.name }} | {{ c.available_status }} | {{ c.accepted }} | {{ c.joined }} | {{ c.openshift_version }} | {{ c.kubernetes_version }} | {{ c.cloud }} | **{{ c.severity }}** |
+{% endfor %}
+
+{% if not acm_cascade_enabled %}
+_Cascade run skipped (acm_cascade_enabled=false) - inventory/health only above. Set acm_cascade_enabled=true to run the full check against every managed cluster and generate a separate report for each._
+{% else %}
+### Cascade: credential resolution
+
+Which clusters the cascade could actually authenticate to, and how - see [README.md's ACM section](../README.md#acm-notes) for the credential model (Hive admin-kubeconfig secret, or a ManagedServiceAccount token).
+
+| Cluster | Checked | Method | Reason |
+|---|---|---|---|
+{% for t in acm_cascade_targets %}
+| {{ t.name }} | {{ t.checked }} | {{ t.auth_method | default('-', true) }} | {{ t.reason | md_cell }} |
+{% endfor %}
+
+### Cascade: per-cluster results
+
+{% if acm_cascade_results | length == 0 %}
+_No clusters had resolvable credentials - nothing was cascaded. See the credential-resolution table above._
+{% else %}
+| Cluster | Overall status | Critical | Warning | Info | Report |
+|---|---|---|---|---|---|
+{% for r in acm_cascade_results %}
+| {{ r.cluster_name }} | **{{ r.overall_status }}** | {{ r.critical_count }} | {{ r.warning_count }} | {{ r.info_count }} | `{{ r.report_basename }}.html` |
+{% endfor %}
+{% for r in acm_cascade_results if r.note is defined %}
+- **{{ r.cluster_name }}**: {{ r.note | md_cell }}
+{% endfor %}
+
+Per-cluster reports (`.md`/`.html`/`.summary.html`) are written to `{{ acm_cascade_report_dir }}/`.
+{% endif %}
+{% endif %}
+{% endif %}
+
+### Manual checklist (verify before upgrading)
+
+{% for item in cnv_manual_checklist %}
+- [ ] {{ item }}
+{% endfor %}
+{% endif %}
+
+---
+_Generated by the OpenShift pre-upgrade health check playbook._

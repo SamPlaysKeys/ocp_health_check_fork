@@ -1,0 +1,45 @@
+---
+- name: Get APIRequestCounts (tracks deprecated/removed API usage cluster-wide)
+  kubernetes.core.k8s_info:
+    api_version: apiserver.openshift.io/v1
+    kind: APIRequestCount
+  register: _arc_raw
+
+- name: Resolve target Kubernetes minor version from upgrade_target_version
+  ansible.builtin.set_fact:
+    target_ocp_minor: "{{ upgrade_target_version.split('.')[0:2] | join('.') }}"
+  when: upgrade_target_version | length > 0
+
+- name: Look up the Kubernetes minor for the target OCP minor
+  ansible.builtin.set_fact:
+    target_k8s_minor: "{{ ocp_to_k8s_minor_map[target_ocp_minor] | default('') }}"
+  when: upgrade_target_version | length > 0
+
+- name: Default target_k8s_minor when no upgrade_target_version was supplied
+  ansible.builtin.set_fact:
+    target_k8s_minor: ""
+  when: upgrade_target_version | length == 0
+
+- name: Warn if the target OCP version isn't in the known OCP->Kubernetes map
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'Deprecated APIs',
+        'severity': 'INFO',
+        'summary': 'upgrade_target_version ' ~ upgrade_target_version ~ ' has no entry in ocp_to_k8s_minor_map - add it to group_vars/all.yml to enable target-specific CRITICAL flagging; showing all deprecated API usage as WARNING instead.',
+      }] }}"
+  when: upgrade_target_version | length > 0 and target_k8s_minor | length == 0
+
+- name: Build deprecated-API-per-namespace report
+  ansible.builtin.set_fact:
+    deprecated_api_data: "{{ (_arc_raw.resources | default([])) | deprecated_api_report(api_report_exclude_namespaces, api_report_min_requests, target_k8s_minor) }}"
+
+- name: Append cluster-wide deprecated API findings
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'Deprecated API (' ~ item.resource ~ ')',
+        'severity': item.severity,
+        'summary': item.resource ~ ' is removed in Kubernetes ' ~ item.removedInRelease ~ ' (' ~ item.requestCount24h ~ ' requests/24h cluster-wide) - see the namespace matrix in the report for callers.',
+      }] }}"
+  loop: "{{ deprecated_api_data.cluster_summary }}"
+  loop_control:
+    label: "{{ item.resource }}"

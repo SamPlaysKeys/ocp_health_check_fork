@@ -1,0 +1,156 @@
+---
+# etcd cluster health - read-only.
+#
+# Deliberately does NOT run `etcdctl check perf`: it's a write-load
+# generator, and upstream etcd issues report it can grow the DB size
+# significantly (etcd-io/etcd#9326) and produce false FAILs depending on
+# load profile (etcd-io/etcd#10609, #13455) - not something to fire
+# automatically against a production control plane right before an upgrade.
+#
+# "IO health" instead comes from `etcdctl endpoint health`'s own round-trip
+# timer (a real linearizable-read latency measurement etcdctl already
+# performs - the `took` field) plus dbSize-vs-quota from `endpoint status`.
+# Both are safe, already-computed numbers; no extra load is generated here.
+#
+# For genuine disk-hardware validation, Red Hat documents an `fio`-based
+# write/fdatasync benchmark - that's listed in the manual checklist below
+# rather than executed automatically, since it sustains real write load
+# against the etcd data disk and should be run deliberately, in a
+# maintenance window, not as a side effect of a routine health check.
+- name: Get etcd pods
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ etcd_namespace }}"
+    label_selectors:
+      - "{{ etcd_pod_selector }}"
+  register: _etcd_pods_raw
+  ignore_errors: true
+
+- name: Seed etcd report variables so the templates render even if exec fails entirely
+  ansible.builtin.set_fact:
+    etcd_health_data: "{{ (_etcd_pods_raw.resources | default([])) | etcd_health_report([], [], '', etcd_quota_bytes, etcd_db_warn_pct, etcd_db_crit_pct, etcd_took_warn_ms, etcd_took_crit_ms) }}"
+    etcdctl_health_raw: "(not yet collected)"
+    etcdctl_status_raw: "(not yet collected)"
+    etcdctl_alarm_raw: "(not yet collected)"
+
+- name: etcdctl checks (only when at least one etcd pod was found)
+  when: (_etcd_pods_raw.resources | default([])) | length > 0
+  block:
+    - name: Pick a Running etcd pod to exec into
+      ansible.builtin.set_fact:
+        etcd_exec_pod: "{{ ((_etcd_pods_raw.resources | selectattr('status.phase', 'equalto', 'Running') | map(attribute='metadata.name') | list) | first) | default('') }}"
+
+    - name: etcdctl endpoint health (JSON)
+      kubernetes.core.k8s_exec:
+        namespace: "{{ etcd_namespace }}"
+        pod: "{{ etcd_exec_pod }}"
+        container: "{{ etcd_exec_container }}"
+        command: etcdctl endpoint health --cluster -w json
+      register: _etcd_health_exec
+      when: etcd_exec_pod | length > 0
+      ignore_errors: true
+
+    - name: etcdctl endpoint status (JSON)
+      kubernetes.core.k8s_exec:
+        namespace: "{{ etcd_namespace }}"
+        pod: "{{ etcd_exec_pod }}"
+        container: "{{ etcd_exec_container }}"
+        command: etcdctl endpoint status --cluster -w json
+      register: _etcd_status_exec
+      when: etcd_exec_pod | length > 0
+      ignore_errors: true
+
+    - name: etcdctl alarm list
+      kubernetes.core.k8s_exec:
+        namespace: "{{ etcd_namespace }}"
+        pod: "{{ etcd_exec_pod }}"
+        container: "{{ etcd_exec_container }}"
+        command: etcdctl alarm list
+      register: _etcd_alarm_exec
+      when: etcd_exec_pod | length > 0
+      ignore_errors: true
+
+    - name: Save raw etcdctl output for the report (always shown, even if JSON parsing below is imperfect)
+      ansible.builtin.set_fact:
+        etcdctl_health_raw: "{{ _etcd_health_exec.stdout | default('(etcdctl endpoint health exec failed or was skipped - review manually)') }}"
+        etcdctl_status_raw: "{{ _etcd_status_exec.stdout | default('(etcdctl endpoint status exec failed or was skipped - review manually)') }}"
+        etcdctl_alarm_raw: "{{ _etcd_alarm_exec.stdout | default('(etcdctl alarm list exec failed or was skipped - review manually)') }}"
+
+    - name: Build the etcd health report
+      ansible.builtin.set_fact:
+        etcd_health_data: "{{ (_etcd_pods_raw.resources | default([])) | etcd_health_report(etcdctl_health_raw, etcdctl_status_raw, ('' if etcdctl_alarm_raw.startswith('(') else etcdctl_alarm_raw), etcd_quota_bytes, etcd_db_warn_pct, etcd_db_crit_pct, etcd_took_warn_ms, etcd_took_crit_ms) }}"
+      # The raw etcdctl "-w json" text is handed straight to the filter plugin,
+      # which does its own JSON parsing/error handling in plain Python
+      # (_safe_json_list in filter_plugins/ocp_health_filters.py). Deliberately
+      # NOT using Jinja's `from_json` filter here first: depending on
+      # Ansible/Jinja2-native settings, `set_fact`-ing a JSON-looking string
+      # (as etcdctl_health_raw/etcdctl_status_raw were, just above) can
+      # silently turn it into an already-parsed native list, and THEN calling
+      # `from_json` on that blows up with "the JSON object must be str, bytes
+      # or bytearray, not list". Parsing once, in Python, in the filter
+      # plugin - which accepts either a raw string or an already-parsed
+      # list/dict - sidesteps that entirely and keeps the "(...)" placeholder
+      # text used above (exec failed/skipped) handled the same way.
+
+- name: Append findings for unhealthy/not-ready etcd pods
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'etcd pod (' ~ item.name ~ ')',
+        'severity': item.severity,
+        'summary': item.name ~ ' on ' ~ item.node ~ ' phase=' ~ item.phase ~ ' ready=' ~ item.ready,
+      }] }}"
+  loop: "{{ etcd_health_data.pods | rejectattr('severity', 'equalto', 'OK') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Append findings for unhealthy/slow etcd endpoints
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'etcd endpoint health (' ~ item.endpoint ~ ')',
+        'severity': item.severity,
+        'summary': item.endpoint ~ (' unhealthy: ' ~ item.error if item.healthy == false else ' round trip took ' ~ (item.took_ms | string) ~ 'ms (threshold ' ~ etcd_took_warn_ms ~ 'ms)'),
+      }] }}"
+  loop: "{{ etcd_health_data.health | rejectattr('severity', 'equalto', 'OK') | list }}"
+  loop_control:
+    label: "{{ item.endpoint }}"
+
+- name: Append findings for etcd db size approaching quota
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'etcd db size (' ~ item.endpoint ~ ')',
+        'severity': item.severity,
+        'summary': item.endpoint ~ ': dbSize=' ~ item.db_size_mb ~ 'MB (' ~ item.db_quota_pct ~ '% of ' ~ (etcd_quota_bytes // 1048576) ~ 'MB quota)' ~ (' - isLearner=true' if item.is_learner else ''),
+      }] }}"
+  loop: "{{ etcd_health_data.status | rejectattr('severity', 'equalto', 'OK') | list }}"
+  loop_control:
+    label: "{{ item.endpoint }}"
+
+- name: Append cluster-level etcd findings (leader/raft-term disagreement)
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'etcd cluster consistency',
+        'severity': item.severity,
+        'summary': item.message,
+      }] }}"
+  loop: "{{ etcd_health_data.cluster_findings }}"
+  loop_control:
+    label: "{{ item.severity }}"
+
+- name: Append findings for active etcd alarms (e.g. NOSPACE)
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'etcd alarm',
+        'severity': item.severity,
+        'summary': item.raw ~ ' - NOSPACE means etcd has hit its storage quota and gone read-only; do not upgrade until this is cleared (defragment + raise quota or free space).',
+      }] }}"
+  loop: "{{ etcd_health_data.alarms }}"
+  loop_control:
+    label: "{{ item.raw }}"
+
+- name: etcd manual checklist (things not safe/possible to automate from here)
+  ansible.builtin.set_fact:
+    etcd_manual_checklist:
+      - "For a real disk-hardware validation (not just current cluster state), Red Hat documents an fio-based write/fdatasync benchmark against the etcd data disk (99th percentile fdatasync should be well under 10ms) - run it deliberately in a maintenance window, not automatically: https://access.redhat.com/solutions/4885641"
+      - "Deliberately not run here: `etcdctl check perf` - it's a write-load generator that can grow the etcd DB size and has known false-FAIL reports under some load profiles; only run it yourself if you specifically want to load-test etcd, not as a pre-upgrade check."
+      - "If dbSize is flagged above, consider `etcdctl defrag` (per-member, one at a time, during a maintenance window) before upgrading - a large gap between dbSize and dbSizeInUse usually means fragmentation, not real growth."
+      - "Cross-check against the etcdHighFsyncDurations / etcdHighCommitDurations / etcdMembersDown alerts in OpenShift's own monitoring (Observe -> Alerting) for a longer time-window view than this point-in-time snapshot gives you."

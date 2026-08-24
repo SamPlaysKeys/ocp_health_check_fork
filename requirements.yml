@@ -1,0 +1,14 @@
+---
+# Install with: ansible-galaxy collection install -r requirements.yml
+collections:
+  - name: kubernetes.core
+    version: ">=3.0.0"
+  - name: community.general
+    version: ">=8.0.0"
+  - name: ansible.utils
+    version: ">=3.0.0"
+
+# Python dependencies (install alongside, e.g. pip install -r requirements.txt --break-system-packages):
+#   kubernetes>=27.2.0
+#   pyyaml
+#   jmespath

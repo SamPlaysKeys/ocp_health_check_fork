@@ -1,0 +1,104 @@
+---
+- name: Seed upgrade-path report variables (so templates never hit an undefined var when upgrade_channel is blank)
+  ansible.builtin.set_fact:
+    upgrade_channel_resolution: {}
+    upgrade_path_result: {}
+
+- name: Get ClusterVersion
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: ClusterVersion
+    name: version
+  register: _cv_raw
+
+- name: Fail fast if the cluster is unreachable
+  ansible.builtin.assert:
+    that:
+      - _cv_raw.resources | default([]) | length > 0
+    fail_msg: >-
+      Could not read ClusterVersion 'version' - check ocp_auth_method / credentials
+      and that the account has cluster-reader (or higher) permissions.
+    quiet: true
+
+- name: Extract ClusterVersion facts
+  ansible.builtin.set_fact:
+    cv: "{{ _cv_raw.resources[0] }}"
+
+- name: Derive cluster identity and update-state facts
+  ansible.builtin.set_fact:
+    cluster_id: "{{ cv.spec.clusterID | default('unknown') }}"
+    cluster_id_short: "{{ (cv.spec.clusterID | default('unknown'))[0:8] }}"
+    current_version: "{{ cv.status.desired.version | default('unknown') }}"
+    current_channel: "{{ cv.spec.channel | default('unset') }}"
+    cv_history: "{{ cv.status.history | default([]) }}"
+    cv_conditions: "{{ cv.status.conditions | default([]) }}"
+    cv_available_updates: "{{ cv.status.availableUpdates | default([]) }}"
+    cv_conditional_updates: "{{ cv.status.conditionalUpdates | default([]) }}"
+
+# Cluster ID (spec.clusterID) is a UUID, not something a human recognizes at a
+# glance. Infrastructure/Console are small, cluster-scoped singletons readable
+# by cluster-reader, so pull the human-friendly identity fields from them for
+# the report header; failures here are non-fatal (default to 'unknown' /
+# empty) since they're identity/display fields, not health checks.
+- name: Get Infrastructure (cluster name, API URL)
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+  register: _infra_raw
+  ignore_errors: true
+
+- name: Get Console (web console URL)
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Console
+    name: cluster
+  register: _console_raw
+  ignore_errors: true
+
+- name: Derive cluster name / API URL / console URL for the report header
+  ansible.builtin.set_fact:
+    cluster_name: "{{ (_infra_raw.resources[0].status.infrastructureName | default('unknown')) if (_infra_raw.resources | default([]) | length > 0) else 'unknown' }}"
+    cluster_api_url: "{{ (_infra_raw.resources[0].status.apiServerURL | default('')) if (_infra_raw.resources | default([]) | length > 0) else '' }}"
+    cluster_console_url: "{{ (_console_raw.resources[0].status.consoleURL | default('')) if (_console_raw.resources | default([]) | length > 0) else '' }}"
+
+- name: Evaluate ClusterVersion conditions
+  ansible.builtin.set_fact:
+    cv_available: "{{ (cv_conditions | selectattr('type', 'equalto', 'Available') | first | default({'status': 'Unknown'})).status }}"
+    cv_progressing: "{{ (cv_conditions | selectattr('type', 'equalto', 'Progressing') | first | default({'status': 'Unknown'})).status }}"
+    cv_degraded: "{{ (cv_conditions | selectattr('type', 'equalto', 'Failing') | first | default({'status': 'Unknown'})).status }}"
+    cv_retrieved_updates: "{{ (cv_conditions | selectattr('type', 'equalto', 'RetrievedUpdates') | first | default({'status': 'Unknown'})).status }}"
+    cv_last_history_state: "{{ (cv_history | first | default({'state': 'unknown'})).state }}"
+
+- name: Resolve upgrade_channel into a concrete channel + best-effort hop-by-hop path (skipped when upgrade_channel is blank)
+  ansible.builtin.include_tasks: tasks/11_upgrade_path.yml
+  when: upgrade_channel | length > 0
+  # Runs here (after current_version is known, before the recommended/conditional
+  # check below) so that a channel-computed target - when upgrade_target_version
+  # itself wasn't explicitly set - is already in upgrade_target_version by the
+  # time the check and severity logic below evaluate it. An explicitly-set
+  # upgrade_target_version is left untouched (it overrides the channel's path -
+  # see tasks/11_upgrade_path.yml) and is checked exactly as before.
+
+- name: Check whether the requested target version is a known/verified update path
+  ansible.builtin.set_fact:
+    target_is_recommended: "{{ upgrade_target_version in (cv_available_updates | map(attribute='version') | list) }}"
+    target_is_conditional: "{{ upgrade_target_version in (cv_conditional_updates | map(attribute='release') | map(attribute='version') | default([]) | list) if cv_conditional_updates | length > 0 else false }}"
+  when: upgrade_target_version | length > 0
+
+- name: Record ClusterVersion severity
+  ansible.builtin.set_fact:
+    cv_severity: >-
+      {{
+        'CRITICAL' if (cv_available == 'False' or cv_degraded == 'True')
+        else ('WARNING' if (cv_progressing == 'True' or cv_last_history_state != 'Completed' or (upgrade_target_version | length > 0 and not (target_is_recommended | default(false)) and not (target_is_conditional | default(false))))
+        else 'OK')
+      }}
+
+- name: Append ClusterVersion finding
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'ClusterVersion',
+        'severity': cv_severity,
+        'summary': 'cluster ' ~ (cluster_name if cluster_name != 'unknown' else cluster_id_short) ~ ' is at ' ~ current_version ~ ' (channel: ' ~ current_channel ~ '), history state: ' ~ cv_last_history_state,
+      }] }}"

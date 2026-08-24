@@ -1,0 +1,32 @@
+---
+- name: Get Nodes
+  kubernetes.core.k8s_info:
+    kind: Node
+  register: _nodes_raw
+
+- name: Get MachineConfigPools
+  kubernetes.core.k8s_info:
+    api_version: machineconfiguration.openshift.io/v1
+    kind: MachineConfigPool
+  register: _mcp_raw
+
+- name: Save raw node/pool lists for later use (MachineConfigPool report reuses these)
+  ansible.builtin.set_fact:
+    ocp_nodes: "{{ _nodes_raw.resources | default([]) }}"
+    ocp_mcps: "{{ _mcp_raw.resources | default([]) }}"
+
+- name: Build node <-> MachineConfigPool render matrix
+  ansible.builtin.set_fact:
+    node_mcp_matrix_report: "{{ ocp_nodes | node_mcp_matrix(ocp_mcps) }}"
+
+- name: Append node/MCP-render findings (non-OK rows only)
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'Node/MachineConfig render (' ~ item.node ~ ')',
+        'severity': item.severity,
+        'summary': item.node ~ ' [' ~ (item.roles | join(',')) ~ '] pool=' ~ item.pool ~ ' status=' ~ item.status
+                   ~ (' reason=' ~ item.mc_reason if item.mc_reason else ''),
+      }] }}"
+  loop: "{{ node_mcp_matrix_report | rejectattr('severity', 'equalto', 'OK') | list }}"
+  loop_control:
+    label: "{{ item.node }}"

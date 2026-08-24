@@ -1,0 +1,135 @@
+---
+# Resolve `upgrade_channel` (e.g. "eus", "eus-4.20", "stable", "stable-4.19")
+# into a concrete Cincinnati channel + a best-effort hop-by-hop upgrade path.
+#
+# Only included (see 10_clusterversion.yml) when upgrade_channel is non-blank -
+# the pre-existing upgrade_target_version-only behavior is completely
+# unaffected when this var is left at its default empty string.
+#
+# Source of truth: the same public Cincinnati graph service the OpenShift web
+# console, `oc adm upgrade`, the Red Hat upgrade-graph lab
+# (access.redhat.com/labs/ocpupgradegraph), and community tools like
+# ctron.github.io/openshift-update-graph all ultimately read from - queried
+# here directly via its JSON API (upgrade_graph_url, default
+# https://api.openshift.com/api/upgrades_info/v1/graph) rather than scraping
+# any of those pages. Override upgrade_graph_url to point at an internal
+# OpenShift Update Service (OSUS) mirror on disconnected/firewalled clusters.
+#
+# EUS is handled correctly, not guessed at: a bare "eus" channel auto-derives
+# the target minor from current_version's parity (see resolve_upgrade_channel
+# in the filter plugin), and the actual hop sequence comes from BFS over the
+# real graph edges (cincinnati_shortest_path) - which naturally requires
+# passing through the intervening odd minor for an EUS jump, since that's how
+# Cincinnati's own graph is shaped (there is no direct 4.18->4.20 edge).
+#
+# Network access to upgrade_graph_url is best-effort and never fails the
+# play: if it's unreachable (common on disconnected clusters), this degrades
+# to reporting the resolved channel name/target minor only, with a note to
+# verify manually via `oc adm upgrade channel <channel>` + `oc adm upgrade`.
+#
+# An explicitly-set upgrade_target_version ALWAYS wins over whatever this
+# file computes (see "Adopt the channel-computed target version..." below) -
+# it overrides the channel-derived path rather than being overridden by it.
+
+- name: Remember whether upgrade_target_version was explicitly provided (before this file might fill it in)
+  ansible.builtin.set_fact:
+    _upgrade_target_was_explicit: "{{ upgrade_target_version | length > 0 }}"
+
+# Reset here rather than relying solely on 10_clusterversion.yml's one-time
+# seed - this file only runs once in the normal (single-cluster) playbook
+# flow, so the seeded {} is never actually stale in practice, but resetting
+# it defensively on every invocation means this file stays safe even if it's
+# ever included more than once in the same play (e.g. a future refactor), and
+# it's what caught the bug below in the first place: without this reset, a
+# channel-parse error further down would leave upgrade_path_result holding
+# whatever it was set to on a PRIOR invocation instead of {} - and the "Adopt
+# the channel-computed target version" task's `when` doesn't check
+# upgrade_channel_resolution.error, only upgrade_path_result.found, so a
+# stale found:true would silently overwrite upgrade_target_version with a
+# leftover target version even though channel resolution had just failed.
+- name: Reset upgrade_path_result for this invocation
+  ansible.builtin.set_fact:
+    upgrade_path_result: {}
+
+- name: Resolve the upgrade_channel string into a concrete channel + target minor
+  ansible.builtin.set_fact:
+    upgrade_channel_resolution: "{{ current_version | resolve_upgrade_channel(upgrade_channel) }}"
+
+- name: Append a finding if upgrade_channel itself couldn't be parsed
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'Upgrade path',
+        'severity': 'WARNING',
+        'summary': 'could not resolve upgrade_channel \"' ~ upgrade_channel ~ '\": ' ~ upgrade_channel_resolution.error,
+      }] }}"
+  when: upgrade_channel_resolution.error is defined
+
+- name: Append findings for any channel-resolution warnings (e.g. a non-even eus- target)
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'Upgrade path',
+        'severity': 'WARNING',
+        'summary': item,
+      }] }}"
+  loop: "{{ upgrade_channel_resolution.notes | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when: upgrade_channel_resolution.error is not defined
+
+- name: Query the Cincinnati update graph for the resolved channel (best-effort, never fails the play)
+  ansible.builtin.uri:
+    url: "{{ upgrade_graph_url }}?channel={{ upgrade_channel_resolution.channel }}&arch={{ upgrade_graph_arch }}"
+    headers:
+      Accept: "application/json"
+    validate_certs: "{{ upgrade_path_validate_certs }}"
+    timeout: "{{ upgrade_path_timeout }}"
+    status_code: [200]
+  register: _upgrade_graph_raw
+  delegate_to: localhost
+  ignore_errors: true
+  when: upgrade_channel_resolution.error is not defined
+
+- name: Compute the hop-by-hop path through the graph to the resolved target
+  ansible.builtin.set_fact:
+    upgrade_path_result: "{{ (_upgrade_graph_raw.json | default({})) | cincinnati_shortest_path(current_version, upgrade_channel_resolution.target_major, upgrade_channel_resolution.target_minor) }}"
+  when:
+    - upgrade_channel_resolution.error is not defined
+    - _upgrade_graph_raw is defined
+    - _upgrade_graph_raw.status | default(0) == 200
+
+- name: Record why no hop-by-hop path is available (graph unreachable or returned an error)
+  ansible.builtin.set_fact:
+    upgrade_path_result:
+      found: false
+      reason: >-
+        upgrade graph endpoint unreachable or returned an error
+        ({{ _upgrade_graph_raw.msg | default('HTTP status ' ~ _upgrade_graph_status) }})
+        - showing the resolved channel/target only; verify manually with
+        `oc adm upgrade channel {{ upgrade_channel_resolution.channel }}` and `oc adm upgrade`
+        once that channel is set on the cluster
+  vars:
+    _upgrade_graph_status: "{{ _upgrade_graph_raw.status | default('unknown') }}"
+  when:
+    - upgrade_channel_resolution.error is not defined
+    - upgrade_path_result == {}
+
+- name: Adopt the channel-computed target version when the user didn't set one explicitly
+  ansible.builtin.set_fact:
+    upgrade_target_version: "{{ upgrade_path_result.target_version }}"
+  when:
+    - upgrade_channel_resolution.error is not defined
+    - not (_upgrade_target_was_explicit | bool)
+    - upgrade_path_result.found | default(false)
+
+- name: Append a finding summarizing the resolved upgrade path
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'Upgrade path',
+        'severity': ('OK' if upgrade_path_result.found | default(false) else 'WARNING'),
+        'summary': (
+          ('channel ' ~ upgrade_channel_resolution.channel ~ ': ' ~ (upgrade_path_result.hops | default([]) | join(' -> ')))
+          if upgrade_path_result.found | default(false)
+          else ('channel ' ~ upgrade_channel_resolution.channel ~ ' resolved (target ' ~ upgrade_channel_resolution.target_major ~ '.' ~ upgrade_channel_resolution.target_minor ~ ') but no path computed: ' ~ (upgrade_path_result.reason | default('unknown')))
+        ) ~ (' [overridden by explicit upgrade_target_version=' ~ upgrade_target_version ~ ']' if _upgrade_target_was_explicit | bool else ''),
+      }] }}"
+  when: upgrade_channel_resolution.error is not defined

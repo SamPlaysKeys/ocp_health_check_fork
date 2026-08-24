@@ -1,0 +1,39 @@
+---
+- name: Get MachineSets (openshift-machine-api)
+  kubernetes.core.k8s_info:
+    api_version: machine.openshift.io/v1beta1
+    kind: MachineSet
+    namespace: openshift-machine-api
+  register: _ms_raw
+  ignore_errors: true   # not all platforms (e.g. bare metal/UPI) run MachineSets
+
+- name: Get Machines (openshift-machine-api)
+  kubernetes.core.k8s_info:
+    api_version: machine.openshift.io/v1beta1
+    kind: Machine
+    namespace: openshift-machine-api
+  register: _machines_raw
+  ignore_errors: true
+
+- name: Build MachineSet vs Machine report
+  ansible.builtin.set_fact:
+    machineset_report_data: "{{ (_ms_raw.resources | default([])) | machineset_report(_machines_raw.resources | default([])) }}"
+  when: not (_ms_raw is failed)
+
+- name: Note that MachineSets are not present on this platform
+  ansible.builtin.set_fact:
+    machineset_report_data: []
+  when: _ms_raw is failed
+
+- name: Append MachineSet findings (non-OK only)
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'MachineSet (' ~ item.name ~ ')',
+        'severity': item.severity,
+        'summary': item.name ~ ': desired=' ~ item.desired ~ ' current=' ~ item.current ~ ' ready=' ~ item.ready
+                   ~ ' available=' ~ item.available ~ ' actualMachines=' ~ item.actual_machine_count
+                   ~ (' - problem machines: ' ~ (item.problem_machines | map(attribute='name') | join(', ')) if item.problem_machines else ''),
+      }] }}"
+  loop: "{{ machineset_report_data | rejectattr('severity', 'equalto', 'OK') | list }}"
+  loop_control:
+    label: "{{ item.name }}"

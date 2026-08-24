@@ -1,0 +1,79 @@
+---
+# =============================================================================
+# OpenShift pre-upgrade health check
+#
+# Read-only health/readiness check to run before starting an OpenShift
+# Container Platform upgrade. Connects via the kubernetes.core collection
+# (kubeconfig, token, or username/password - see group_vars/all.yml) and
+# produces three report artifacts under report_output_dir:
+#   *.md            - Markdown, safe to commit to git alongside the change ticket
+#   *.html          - full standalone HTML report, open in any browser
+#   *.summary.html  - compact HTML fragment/widget suitable for embedding
+#
+# Usage:
+#   ansible-galaxy collection install -r requirements.yml
+#   pip install -r requirements.txt --break-system-packages
+#   ansible-playbook playbook.yml \
+#     -e ocp_auth_method=token -e ocp_api_host=https://api.mycluster:6443 \
+#     -e ocp_api_token="$(oc whoami -t)" -e upgrade_target_version=4.17.14
+# =============================================================================
+- name: OpenShift pre-upgrade health check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  module_defaults:
+    group/kubernetes.core.k8s: "{{ k8s_conn | default({}) }}"
+
+  tasks:
+    - name: 00 - connection setup and shared facts
+      ansible.builtin.include_tasks: tasks/00_facts.yml
+      tags: [facts, always]
+
+    - name: 10 - ClusterVersion (identity, current version, update graph)
+      ansible.builtin.include_tasks: tasks/10_clusterversion.yml
+      tags: [clusterversion]
+
+    - name: 15 - etcd cluster health
+      ansible.builtin.include_tasks: tasks/15_etcd_health.yml
+      tags: [etcd]
+
+    - name: 20 - Node <-> MachineConfigPool render matrix
+      ansible.builtin.include_tasks: tasks/20_nodes_mcp_matrix.yml
+      tags: [nodes, mcp]
+
+    - name: 30 - ClusterOperators
+      ansible.builtin.include_tasks: tasks/30_clusteroperators.yml
+      tags: [clusteroperators]
+
+    - name: 40 - MachineConfigPool status/counts
+      ansible.builtin.include_tasks: tasks/40_machineconfigpools.yml
+      tags: [mcp]
+
+    - name: 50 - MachineSets vs Machines
+      ansible.builtin.include_tasks: tasks/50_machinesets.yml
+      tags: [machinesets]
+
+    - name: 60 - Deprecated/removed API usage per namespace
+      ansible.builtin.include_tasks: tasks/60_deprecated_apis.yml
+      tags: [deprecated_apis]
+
+    - name: 65 - Resources stuck Terminating on a finalizer
+      ansible.builtin.include_tasks: tasks/65_stuck_finalizers.yml
+      tags: [finalizers]
+
+    - name: 70 - Portworx storage layer checks
+      ansible.builtin.include_tasks: tasks/70_portworx.yml
+      tags: [portworx]
+
+    - name: 80 - OpenShift Virtualization (CNV/KubeVirt) checks
+      ansible.builtin.include_tasks: tasks/80_openshift_virtualization.yml
+      tags: [virtualization, cnv]
+
+    - name: 85 - Advanced Cluster Management (ACM) hub health, managed-cluster inventory, and cascade
+      ansible.builtin.include_tasks: tasks/85_acm.yml
+      tags: [acm]
+
+    - name: 90 - Render reports and evaluate overall readiness
+      ansible.builtin.include_tasks: tasks/90_render_report.yml
+      tags: [report, always]

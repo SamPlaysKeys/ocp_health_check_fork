@@ -1,0 +1,239 @@
+---
+# =============================================================================
+# OpenShift pre-upgrade health check - configuration
+# Override any of these with -e @myvars.yml, -e key=value, or a vault file.
+# Never commit real tokens/passwords - use ansible-vault or -e at run time.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. Cluster connection (kubernetes.core auth) - pick ONE method
+# -----------------------------------------------------------------------------
+# ocp_auth_method: kubeconfig | token | password
+ocp_auth_method: kubeconfig
+
+# --- kubeconfig method -------------------------------------------------------
+ocp_kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default('~/.kube/config', true) }}"
+ocp_context: ""                     # optional: a specific context name inside the kubeconfig
+
+# --- token method (e.g. `oc whoami -t`, or a ServiceAccount token) ----------
+ocp_api_host: ""                    # e.g. https://api.mycluster.example.com:6443
+ocp_api_token: ""                   # pass with -e ocp_api_token=... or via vault, do not commit
+
+# --- username/password method (basic auth / htpasswd identity provider) -----
+ocp_username: ""
+ocp_password: ""
+
+# --- shared TLS options -------------------------------------------------------
+ocp_validate_certs: true
+ocp_ca_cert: ""                     # path to a CA bundle if the API cert isn't already trusted
+
+# -----------------------------------------------------------------------------
+# 2. Upgrade context
+# -----------------------------------------------------------------------------
+# The OCP version/channel you intend to upgrade to. Used to:
+#  - sanity check it appears in status.availableUpdates / conditionalUpdates
+#  - resolve which Kubernetes minor version deprecates/removes an API
+#    (used against APIRequestCount.status.removedInRelease)
+upgrade_target_version: ""          # e.g. "4.17.14"  (leave blank to auto-derive from
+                                     # upgrade_channel below, or skip target-specific
+                                     # checks entirely if that's blank too). ALWAYS wins
+                                     # over whatever upgrade_channel computes - set this
+                                     # if you already know the exact z-stream you want.
+
+# --- upgrade_channel: resolve a target from a CHANNEL instead of a fixed version ------
+# Leave blank (default) to use upgrade_target_version alone, exactly as before - none of
+# this runs. Set to a bare prefix or a fully-qualified channel name:
+#   upgrade_channel: "eus"          # auto-derive the next EUS (even-minor) target from
+#                                    # current_version's parity: already-even current ->
+#                                    # +2 (e.g. 4.18 -> 4.20, skipping the intervening odd
+#                                    # EUS boundary); odd current -> +1 (e.g. 4.17 -> 4.18).
+#   upgrade_channel: "stable"       # (or "fast"/"candidate") -> always current + 1 minor.
+#   upgrade_channel: "eus-4.20"     # fully-qualified - used as given, no auto-derivation.
+#   upgrade_channel: "stable-4.19"  # same.
+# Either way, the actual hop-by-hop path is looked up against the real Cincinnati update
+# graph (see upgrade_graph_url below) - not hand-computed - since e.g. an EUS channel's
+# graph has no direct edge from one EUS minor straight to the next; it genuinely requires
+# passing through the intervening odd minor first, which only a real graph lookup gets
+# right. If upgrade_target_version is also set, it overrides whatever this resolves to
+# (the resolved channel/path still shows in the report, just marked overridden) - if
+# it's left blank, the highest version found along the resolved path is adopted as
+# upgrade_target_version automatically, so every existing target-version-based check
+# (recommended/conditional update, deprecated-API-per-target-minor) applies to it exactly
+# as if you'd typed it in directly. See README.md's "Upgrade channel/path resolution"
+# section for the full design, including what happens when the graph is unreachable
+# (disconnected/firewalled clusters - degrades to reporting the resolved channel/target
+# only, never fails the play).
+upgrade_channel: ""
+
+# Public Cincinnati update-graph endpoint - the same graph service `oc adm upgrade`, the
+# OpenShift web console, the Red Hat upgrade-graph lab (access.redhat.com/labs/
+# ocpupgradegraph), and community tools like ctron.github.io/openshift-update-graph all
+# read from, queried here directly as JSON rather than scraped from any of those pages.
+# Point this at your own OpenShift Update Service (OSUS) mirror if this cluster (or
+# wherever this playbook runs from) doesn't have direct internet egress to
+# api.openshift.com - a very common setup for disconnected/firewalled OCP installs.
+upgrade_graph_url: "https://api.openshift.com/api/upgrades_info/v1/graph"
+upgrade_graph_arch: "amd64"
+upgrade_path_validate_certs: true
+upgrade_path_timeout: 15            # seconds - the graph fetch is best-effort; on
+                                     # timeout/failure the report still shows the
+                                     # resolved channel/target, just without a
+                                     # hop-by-hop path (see upgrade_channel above)
+
+# Best-effort OCP -> Kubernetes minor version map, used only to flag
+# deprecated/removed APIs relevant to your target release. Verify against the
+# release notes for your target version (https://docs.redhat.com/.../release_notes)
+# before relying on it, and extend the table as new OCP releases ship.
+ocp_to_k8s_minor_map:
+  "4.12": "1.25"
+  "4.13": "1.26"
+  "4.14": "1.27"
+  "4.15": "1.28"
+  "4.16": "1.29"
+  "4.17": "1.30"
+  "4.18": "1.31"
+  "4.19": "1.32"   # best-effort projection, verify against release notes
+  "4.20": "1.33"   # best-effort projection, verify against release notes
+
+# -----------------------------------------------------------------------------
+# 3. etcd cluster health
+# -----------------------------------------------------------------------------
+etcd_namespace: "openshift-etcd"
+etcd_pod_selector: "app=etcd"
+etcd_exec_container: "etcdctl"      # OpenShift's etcd static pod ships a dedicated etcdctl sidecar
+                                     # with endpoints/certs already configured via env vars
+etcd_quota_bytes: 8589934592        # 8GiB - OpenShift's etcd operator default quota-backend-bytes
+etcd_db_warn_pct: 0.8               # dbSize / quota ratio that triggers WARNING
+etcd_db_crit_pct: 0.95              # ...and CRITICAL
+etcd_took_warn_ms: 50               # endpoint-health round-trip latency ("took") that triggers WARNING
+                                     # (Red Hat's own guidance: etcd network p99 round trip should be <50ms)
+etcd_took_crit_ms: 300              # ...and CRITICAL
+
+# -----------------------------------------------------------------------------
+# 4. Deprecated-API-per-namespace report
+# -----------------------------------------------------------------------------
+# APIRequestCount doesn't natively carry a namespace field; namespaces are
+# recovered by parsing "system:serviceaccount:<namespace>:<name>" usernames.
+# Requests from human users / other principals are grouped under "(non-namespaced / human user)".
+api_report_exclude_namespaces: []   # e.g. ["openshift-*", "kube-*"] to hide platform namespaces
+api_report_min_requests: 1          # ignore usernames with fewer than N requests/24h
+
+# -----------------------------------------------------------------------------
+# 5. Portworx
+# -----------------------------------------------------------------------------
+portworx_enabled: true
+portworx_namespace: "portworx"      # commonly "portworx" (operator install) or "kube-system" (legacy)
+portworx_storagecluster_name: ""    # leave blank to auto-discover the (single) StorageCluster
+portworx_pod_selector: "name=portworx"   # label selector for the portworx daemonset pods
+portworx_container: "portworx"
+portworx_exec_enabled: true         # set false to skip `pxctl` exec calls (CR-only checks still run)
+portworx_exec_timeout: 30
+
+# -----------------------------------------------------------------------------
+# 6. Stuck finalizers (Namespaces, PVs/PVCs, and every installed CRD kind)
+# -----------------------------------------------------------------------------
+finalizer_scan_include_crs: true    # the expensive part - one k8s_info list call per Established CRD kind.
+                                     # Set false on very large clusters to keep only the cheap
+                                     # Namespace/PV/PVC checks.
+finalizer_scan_exclude_crds: []     # CRD names (metadata.name, e.g. "prometheusrules.monitoring.coreos.com")
+                                     # to skip from the dynamic scan - noisy or very large CRD types
+finalizer_scan_stuck_after_seconds: 600   # only flag CRITICAL once deletionTimestamp is this old (10 min);
+                                           # briefly deleting is normal cluster activity, not a problem
+
+# -----------------------------------------------------------------------------
+# 7. OpenShift Virtualization (CNV/KubeVirt)
+# -----------------------------------------------------------------------------
+cnv_enabled: true                   # set false to skip this section entirely on clusters without OpenShift Virtualization
+cnv_namespace: "openshift-cnv"
+cnv_hyperconverged_name: ""         # leave blank to auto-discover the (single) HyperConverged CR
+cnv_kubevirt_name: ""               # leave blank to auto-discover the (single) KubeVirt CR
+
+# -----------------------------------------------------------------------------
+# 8. Advanced Cluster Management (ACM) - hub health, managed-cluster
+#    inventory, and (optional) cascading the whole check to every managed
+#    cluster as a separate report. See README.md's ACM section before
+#    turning on acm_cascade_enabled - it explains the credential model and
+#    the one place this otherwise-read-only project writes to a cluster.
+# -----------------------------------------------------------------------------
+acm_enabled: false                  # set true only when running this against an ACM hub
+acm_namespace: "open-cluster-management"   # where the MultiClusterHub CR lives
+acm_exclude_clusters: ["local-cluster"]    # ACM lists the hub as a ManagedCluster named
+                                            # "local-cluster" too; excluded from the cascade by
+                                            # default since you'd normally run this playbook
+                                            # against the hub directly instead (its own report
+                                            # already covers it) - still listed in the inventory
+                                            # table either way, just skipped by the cascade.
+
+# --- cascade: actually run the full check against every managed cluster -----
+acm_cascade_enabled: false          # false = inventory/health only, no credentials touched, no writes
+acm_cascade_report_dir: "{{ report_output_dir }}/acm-managed-clusters"
+acm_cascade_fail_on_critical: false # a spoke's CRITICAL findings show up in the cascade summary either
+                                     # way; this only controls whether that CHILD run's own process
+                                     # exits non-zero (kept false so one bad spoke can't abort the
+                                     # others or the hub's own report)
+acm_cascade_validate_certs: true
+acm_cascade_upgrade_target_version: ""     # usually leave blank - spokes are often on different
+                                            # versions/timelines than the hub; set per-cluster by hand
+                                            # if you actually want the update-path check run identically
+                                            # everywhere
+
+# --- credential resolution, in preference order ------------------------------
+acm_prefer_hive_kubeconfig: true    # prefer the Hive admin-kubeconfig secret over a
+                                     # ManagedServiceAccount token when both are available
+acm_use_managed_service_account: true
+acm_create_managed_service_accounts: false  # THE ONE WRITE in this otherwise read-only project:
+                                             # true lets the playbook create a ManagedServiceAccount CR
+                                             # (+ its ServiceAccount + token Secret) on the hub for any
+                                             # managed cluster that doesn't already have one. Defaults
+                                             # false - by default the cascade only uses Hive kubeconfig
+                                             # secrets and ManagedServiceAccounts a human/policy already
+                                             # provisioned. See README.md before turning this on.
+acm_msa_name: "ocp-preupgrade-healthcheck"  # name of the ManagedServiceAccount CR/ServiceAccount/Secret,
+                                             # deliberately obvious/attributable if you go looking for it
+acm_msa_token_validity: "3600s"     # ManagedServiceAccount token rotation validity
+acm_msa_wait_retries: 6             # how long to wait for the add-on to sync the token Secret back
+acm_msa_wait_delay: 10              # to the hub: retries * delay seconds, per cluster (default 60s)
+
+# --- reaching the spoke's API once credentials are resolved -------------------
+acm_use_cluster_proxy: false        # false: use the spoke's own API URL from the ManagedCluster's
+                                     # spec.managedClusterClientConfigs (needs direct network reachability
+                                     # from wherever this playbook runs - the common case for most OCP
+                                     # managed clusters). true: route through ACM's cluster-proxy add-on
+                                     # instead (needed for network-isolated spokes, but only reachable
+                                     # from inside/near the hub cluster itself - see README.md).
+acm_cluster_proxy_base_url: "https://cluster-proxy-addon-user.multicluster-engine.svc:9092"
+
+# --- the cascade's child ansible-playbook process -----------------------------
+# Each cascaded cluster is a brand-new `ansible-playbook` process (see
+# README.md's "ACM notes" - subprocess-per-cluster is deliberate), and only the
+# extra-vars this playbook explicitly writes for it are visible to that child -
+# nothing from the outer command line (other -e flags, env vars) carries over
+# automatically. `ansible_python_interpreter` is forwarded FOR YOU (see below),
+# since needing a specific interpreter - a pyenv/virtualenv python with the
+# `kubernetes`/`openshift` pip libraries installed, common when `ansible-playbook`
+# itself isn't run from inside that venv - is the single most likely thing to
+# break silently across the subprocess boundary. If the outer run needs any
+# OTHER extra-var forwarded into every cascaded child (an HTTP(S)_PROXY-style
+# var some environments pass as an extra-var, a custom module_defaults toggle,
+# etc.), add it here rather than editing tasks/85_acm.yml:
+acm_cascade_extra_vars: {}          # e.g. {"ansible_python_interpreter": "/opt/venvs/ocp/bin/python"}
+                                     # - merged on TOP of the auto-forwarded ansible_python_interpreter
+                                     # and the credential vars below, so it can override either.
+
+acm_cascade_debug: false             # The two tasks that write per-cluster kubeconfig/
+                                      # extra-vars files use `no_log: true` (they handle
+                                      # kubeconfig content and API tokens) - which also
+                                      # hides the real error message if either task ever
+                                      # fails, behind Ansible's generic "censored" output.
+                                      # If you hit that, re-run once with
+                                      # `-e acm_cascade_debug=true` to see the actual
+                                      # failure - it WILL print credential material to
+                                      # your terminal/log for that one run, so turn it
+                                      # back off (or just don't set it) afterwards.
+
+# -----------------------------------------------------------------------------
+# 9. Report / behavior
+# -----------------------------------------------------------------------------
+report_output_dir: "{{ playbook_dir }}/reports"
+report_basename: "ocp-preupgrade-health-{{ cluster_id_short | default('cluster') }}-{{ report_timestamp }}"
+fail_on_critical: true              # fail the play at the end if critical findings were recorded

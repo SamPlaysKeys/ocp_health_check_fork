@@ -1,0 +1,161 @@
+---
+# OpenShift Virtualization (CNV/KubeVirt) pre-upgrade checks.
+#
+# What this automates (read-only, via the Kubernetes/OpenShift API):
+#   - HyperConverged + KubeVirt (+ CDI, if present) operator condition health
+#   - KubeVirt's own outdated-workload counter (VMIs still on an old virt-launcher)
+#   - a per-VM node-drain-readiness matrix built from each VirtualMachineInstance's
+#     LiveMigratable condition, its evictionStrategy, and whether it has a
+#     CD-ROM/ISO disk attached (read-only disks are a known, field-reported
+#     cause of migrations stalling even when LiveMigratable reports True -
+#     libvirt itself refuses to migrate a read-only disk)
+#   - any VirtualMachineInstanceMigration objects currently Failed or Running
+#
+# What this does NOT fully automate: whether your specific CNV/HCO version
+# supports the OCP release you're upgrading to (Red Hat has shipped HCO
+# versions that explicitly block upgrading past certain OCP minors - see the
+# manual checklist below) - cross-check the compatibility matrix for your
+# installed HCO version before proceeding.
+- name: Seed OpenShift Virtualization report variables so the templates render even when disabled/skipped
+  ansible.builtin.set_fact:
+    cnv_hco_list: []
+    cnv_component_report: []
+    vmi_migration_report_data: []
+    kv_outdated_count: 0
+    kv_update_methods: []
+    cnv_manual_checklist: []
+
+- name: OpenShift Virtualization checks
+  when: cnv_enabled | bool
+  block:
+    - name: Discover the HyperConverged CR
+      kubernetes.core.k8s_info:
+        api_version: hco.kubevirt.io/v1beta1
+        kind: HyperConverged
+        namespace: "{{ cnv_namespace }}"
+        name: "{{ cnv_hyperconverged_name | default(omit) }}"
+      register: _hco_raw
+      ignore_errors: true
+
+    - name: Record whether OpenShift Virtualization is actually installed
+      ansible.builtin.set_fact:
+        cnv_hco_list: "{{ _hco_raw.resources | default([]) }}"
+
+    - name: Flag when CNV is enabled in vars but no HyperConverged CR was found
+      ansible.builtin.set_fact:
+        findings: "{{ findings + [{
+            'section': 'OpenShift Virtualization',
+            'severity': 'WARNING',
+            'summary': 'cnv_enabled=true but no HyperConverged CR was found in namespace ' ~ cnv_namespace ~ ' - set cnv_enabled=false if this cluster does not run OpenShift Virtualization, or fix cnv_namespace/cnv_hyperconverged_name.',
+          }] }}"
+      when: cnv_hco_list | length == 0
+
+    - name: OpenShift Virtualization detail checks (only when a HyperConverged CR exists)
+      when: cnv_hco_list | length > 0
+      block:
+        - name: Get the KubeVirt CR
+          kubernetes.core.k8s_info:
+            api_version: kubevirt.io/v1
+            kind: KubeVirt
+            namespace: "{{ cnv_namespace }}"
+            name: "{{ cnv_kubevirt_name | default(omit) }}"
+          register: _kv_raw
+          ignore_errors: true
+
+        - name: Get the CDI CR (cluster-scoped, best-effort)
+          kubernetes.core.k8s_info:
+            api_version: cdi.kubevirt.io/v1beta1
+            kind: CDI
+          register: _cdi_raw
+          ignore_errors: true
+
+        - name: Build a combined component health report (HCO + KubeVirt + CDI share the Available/Progressing/Degraded/Upgradeable condition convention)
+          ansible.builtin.set_fact:
+            cnv_component_report: "{{ (cnv_hco_list + (_kv_raw.resources | default([])) + (_cdi_raw.resources | default([]))) | co_report }}"
+
+        - name: Append findings for non-OK OpenShift Virtualization components
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'OpenShift Virtualization component (' ~ item.name ~ ')',
+                'severity': item.severity,
+                'summary': item.name ~ ' Available=' ~ item.available ~ ' Progressing=' ~ item.progressing
+                           ~ ' Degraded=' ~ item.degraded ~ ' Upgradeable=' ~ item.upgradeable
+                           ~ (' - ' ~ (item.messages | join(' | ')) if item.messages else ''),
+              }] }}"
+          loop: "{{ cnv_component_report | rejectattr('severity', 'equalto', 'OK') | list }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Extract KubeVirt workload-update facts
+          ansible.builtin.set_fact:
+            kv_outdated_count: "{{ (_kv_raw.resources[0].status.outdatedVirtualMachineInstanceWorkloads | default(0)) if _kv_raw.resources | default([]) | length > 0 else 0 }}"
+            kv_update_methods: "{{ (_kv_raw.resources[0].spec.workloadUpdateStrategy.workloadUpdateMethods | default([])) if _kv_raw.resources | default([]) | length > 0 else [] }}"
+
+        - name: Flag outdated VMI workloads (still running an old virt-launcher pod)
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'OpenShift Virtualization workloads',
+                'severity': 'WARNING',
+                'summary': kv_outdated_count ~ ' VirtualMachineInstance(s) are on an outdated virt-launcher and have not been live-migrated/restarted yet - workloadUpdateMethods=' ~ kv_update_methods ~ '. Let these settle (or trigger them manually) before upgrading.',
+              }] }}"
+          when: kv_outdated_count | int > 0
+
+        - name: Get all VirtualMachineInstances (all namespaces)
+          kubernetes.core.k8s_info:
+            api_version: kubevirt.io/v1
+            kind: VirtualMachineInstance
+          register: _vmis_raw
+          ignore_errors: true
+
+        - name: Build the per-VM node-drain-readiness matrix
+          ansible.builtin.set_fact:
+            vmi_migration_report_data: "{{ (_vmis_raw.resources | default([])) | vmi_migration_report }}"
+
+        - name: Append findings for VMs that may block or need attention during node drain
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'VM drain readiness (' ~ item.namespace ~ '/' ~ item.name ~ ')',
+                'severity': item.severity,
+                'summary': item.namespace ~ '/' ~ item.name ~ ' on ' ~ (item.node | default('?')) ~ ': ' ~ (item.reasons | join(' | ')),
+              }] }}"
+          loop: "{{ vmi_migration_report_data | rejectattr('severity', 'in', ['OK', 'INFO']) | list }}"
+          loop_control:
+            label: "{{ item.namespace }}/{{ item.name }}"
+
+        - name: Get VirtualMachineInstanceMigration objects (all namespaces)
+          kubernetes.core.k8s_info:
+            api_version: kubevirt.io/v1
+            kind: VirtualMachineInstanceMigration
+          register: _vmim_raw
+          ignore_errors: true
+
+        - name: Append finding for any Failed migrations
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'VM migration (' ~ item.metadata.namespace ~ '/' ~ item.metadata.name ~ ')',
+                'severity': 'CRITICAL',
+                'summary': item.metadata.namespace ~ '/' ~ item.metadata.name ~ ' for VMI ' ~ (item.spec.vmiName | default('?')) ~ ' phase=Failed - resolve before upgrading, a stuck/failed migration will block draining the node that VM runs on.',
+              }] }}"
+          loop: "{{ (_vmim_raw.resources | default([])) | selectattr('status.phase', 'defined') | selectattr('status.phase', 'equalto', 'Failed') | list }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+
+        - name: Append finding for any in-progress migrations (informational)
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'VM migration (' ~ item.metadata.namespace ~ '/' ~ item.metadata.name ~ ')',
+                'severity': 'INFO',
+                'summary': item.metadata.namespace ~ '/' ~ item.metadata.name ~ ' for VMI ' ~ (item.spec.vmiName | default('?')) ~ ' phase=' ~ item.status.phase ~ ' - in progress, let it finish before starting the upgrade.',
+              }] }}"
+          loop: "{{ (_vmim_raw.resources | default([])) | selectattr('status.phase', 'defined') | selectattr('status.phase', 'in', ['Running', 'Scheduling', 'Scheduled', 'PreparingTarget', 'TargetReady']) | list }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+
+        - name: Manual checklist notes (version compatibility can't be safely inferred from here)
+          ansible.builtin.set_fact:
+            cnv_manual_checklist:
+              - "Confirm the installed HyperConverged Operator (HCO/CNV) version supports upgrading to your target OCP release - Red Hat has shipped HCO CSVs that explicitly block cluster upgrades past certain OpenShift minors (a ClusterServiceVersion-blocking-upgrade warning). Check Red Hat's OpenShift Virtualization support matrix for your installed HCO version."
+              - "For any VM backed by hostpath-provisioner storage: it cannot be live-migrated. Either accept it will be shut down on drain (evictionStrategy=None + runStrategy=Always so it restarts elsewhere automatically), or migrate its storage off hostpath-provisioner first."
+              - "For VMs flagged above with a CD-ROM/ISO attached and evictionStrategy=LiveMigrate: consider detaching the ISO if it's no longer needed post-install, or switch that VM to evictionStrategy=None so drain shuts it down instead of hanging on a migration that libvirt will refuse."
+              - "Review `oc get vmim -A` yourself right before starting the upgrade (this report is a point-in-time snapshot) to make sure no new migrations started after this report was generated."
+              - "During an EUS-to-EUS upgrade, consider temporarily setting spec.workloadUpdateStrategy.workloadUpdateMethods to [] on the KubeVirt CR to avoid redundant live-migrations between the two hops, per Red Hat's updating-OpenShift-Virtualization guide."

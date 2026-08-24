@@ -1,0 +1,99 @@
+---
+# Resources stuck Terminating on a finalizer.
+#
+# A finalizer blocks actual deletion until whatever registered it (a
+# controller, an admission webhook, an operator) removes it. If that owner is
+# gone, crashed, or was uninstalled without cleaning up after itself, the
+# object sits forever with deletionTimestamp set and never actually goes
+# away - and depending on what it is, that can block namespace deletion,
+# storage detach/cleanup, or just leave a broken operator's leftovers around
+# right when you're about to upgrade the platform underneath it. This is
+# generic cluster hygiene, not tied to Portworx or OpenShift Virtualization,
+# so it always runs (their own sections still catch domain-specific stuck
+# states like a VM that can't be evicted).
+#
+# What this checks (read-only):
+#   - Namespaces stuck in phase=Terminating
+#   - PersistentVolumes / PersistentVolumeClaims stuck Terminating (a classic
+#     symptom of a dead/broken CSI driver or storage-protection finalizer)
+#   - every installed, Established CustomResourceDefinition - one k8s_info
+#     list call per CRD kind, cluster-wide, looking for the same
+#     deletionTimestamp+finalizers combination
+#
+# A deletionTimestamp+finalizers combination is only flagged CRITICAL once
+# it's been that way for finalizer_scan_stuck_after_seconds (default 10min) -
+# briefly deleting is completely normal cluster activity, not a problem.
+#
+# finalizer_scan_include_crs is the expensive part: one API call per
+# Established CRD (can be 100+ on a cluster with several operators). It's on
+# by default because that's where the actual value is, but set it to false on
+# very large clusters, or add noisy/huge CRDs to finalizer_scan_exclude_crds.
+- name: Get Namespaces
+  kubernetes.core.k8s_info:
+    kind: Namespace
+  register: _ns_raw
+  ignore_errors: true
+
+- name: Get PersistentVolumes
+  kubernetes.core.k8s_info:
+    kind: PersistentVolume
+  register: _pv_raw
+  ignore_errors: true
+
+- name: Get PersistentVolumeClaims (all namespaces)
+  kubernetes.core.k8s_info:
+    kind: PersistentVolumeClaim
+  register: _pvc_raw
+  ignore_errors: true
+
+- name: Seed the dynamic-CRD-scan result so the report renders even when that part is skipped
+  ansible.builtin.set_fact:
+    _cr_scan_raw: {"results": []}
+
+- name: Dynamic CustomResourceDefinition sweep
+  when: finalizer_scan_include_crs | bool
+  block:
+    - name: Get all installed CustomResourceDefinitions
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+      register: _crd_raw
+      ignore_errors: true
+
+    - name: Reduce to the CRD kinds worth scanning (Established, not excluded)
+      ansible.builtin.set_fact:
+        crd_scan_targets_list: "{{ (_crd_raw.resources | default([])) | crd_scan_targets(finalizer_scan_exclude_crds) }}"
+
+    - name: List every instance of every scanned CRD kind, cluster-wide
+      kubernetes.core.k8s_info:
+        api_version: "{{ item.group }}/{{ item.version }}"
+        kind: "{{ item.kind }}"
+      loop: "{{ crd_scan_targets_list }}"
+      loop_control:
+        label: "{{ item.kind }}"
+      register: _cr_scan_raw
+      ignore_errors: true
+
+- name: Build the stuck-finalizer report
+  ansible.builtin.set_fact:
+    finalizer_stuck_data: "{{ {'Namespace': (_ns_raw.resources | default([])), 'PersistentVolume': (_pv_raw.resources | default([])), 'PersistentVolumeClaim': (_pvc_raw.resources | default([]))} | finalizer_stuck_report(_cr_scan_raw.results | default([]), report_generated_at, finalizer_scan_stuck_after_seconds) }}"
+
+- name: Note how many CRDs could not be listed and were skipped from the scan
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'Stuck finalizers',
+        'severity': 'INFO',
+        'summary': finalizer_stuck_data.crds_failed ~ ' of ' ~ finalizer_stuck_data.crds_scanned ~ ' CustomResourceDefinition kinds could not be listed (RBAC or a schema issue) and were skipped from this scan.',
+      }] }}"
+  when: finalizer_scan_include_crs | bool and finalizer_stuck_data.crds_failed | int > 0
+
+- name: Append findings for resources genuinely stuck Terminating
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'Stuck finalizer (' ~ item.kind ~ ' ' ~ (item.namespace ~ '/' if item.namespace else '') ~ item.name ~ ')',
+        'severity': item.severity,
+        'summary': item.kind ~ ' ' ~ (item.namespace ~ '/' if item.namespace else '') ~ item.name ~ ' has been Terminating for ' ~ item.age_human ~ ' - finalizers ' ~ item.finalizers ~ ' - the owning controller/operator is likely gone or stuck; investigate before upgrading.',
+      }] }}"
+  loop: "{{ finalizer_stuck_data.rows | selectattr('severity', 'equalto', 'CRITICAL') | list }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
