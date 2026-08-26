@@ -125,6 +125,35 @@ def _parse_took_ms(took: Any) -> Optional[float]:
     return value * {"ms": 1.0, "s": 1000.0, "µs": 0.001, "us": 0.001}[unit]
 
 
+def _safe_json_dict(value: Any) -> Dict[str, Any]:
+    """Best-effort parse of a `ceph ... -f json` capture into a dict - the
+    object-shaped sibling of _safe_json_list above (ceph status/df return a
+    JSON OBJECT, not a list). Same defensive rationale and the same etcdctl
+    lesson applies: accept an already-native dict (Jinja2's NativeEnvironment
+    may have converted a set_fact string before it reaches this filter), a
+    raw JSON string, or the "(...)" placeholder text used when an exec call
+    failed - and never raise, so a bad capture degrades to an empty dict
+    rather than crashing the play."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return value[0] if value and isinstance(value[0], dict) else {}
+    if not isinstance(value, str):
+        return {}
+    text = value.strip()
+    if not text or text.startswith("("):
+        return {}
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return {}
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        return parsed[0] if parsed and isinstance(parsed[0], dict) else {}
+    return {}
+
+
 def _parse_ocp_version(value: Any):
     """Parse a 'major.minor.patch[-suffix]' OCP version string into
     (major, minor, patch) ints, or None if it doesn't look like one."""
@@ -1212,7 +1241,173 @@ def cincinnati_shortest_path(
 
 
 # ----------------------------------------------------------------------------
-# 11. Markdown table cell escaping
+# 11. OpenShift Data Foundation (ODF/OCS) + Ceph cluster health
+# ----------------------------------------------------------------------------
+def cephcluster_report(cephclusters: List[dict]) -> List[dict]:
+    """Health of the CephCluster CR (ceph.rook.io/v1) managed by ODF's
+    rook-ceph operator. Unlike StorageCluster (ocs.openshift.io/v1, which
+    reuses co_report() below - it follows the same Available/Progressing/
+    Degraded/Upgradeable condition convention as HCO/KubeVirt/CDI), the
+    CephCluster CR does NOT follow that convention: it reports state via a
+    top-level status.phase (Ready/Progressing/Failure/Connecting/...) plus a
+    nested status.ceph.health summary (HEALTH_OK/HEALTH_WARN/HEALTH_ERR) that
+    Rook itself keeps in sync with the storage cluster's actual `ceph status`.
+    Shaped like co_report()'s rows (name/severity/messages) so the task file
+    and templates can treat every component report uniformly."""
+    rows = []
+    for cc in cephclusters or []:
+        name = _get(cc, "metadata.name")
+        phase = _get(cc, "status.phase") or _get(cc, "status.state", "Unknown")
+        ceph = _get(cc, "status.ceph", {}) or {}
+        ceph_health = ceph.get("health", "") or ""
+        ceph_details = ceph.get("details", {}) or {}
+        last_checked = ceph.get("lastChecked", "")
+
+        messages = [
+            f"{check_name}: {detail.get('message')}"
+            for check_name, detail in ceph_details.items()
+            if isinstance(detail, dict) and detail.get("message")
+        ]
+        state_message = _get(cc, "status.message", "")
+        if state_message:
+            messages.append(state_message)
+
+        if phase == "Failure" or ceph_health == "HEALTH_ERR":
+            severity = "CRITICAL"
+        elif phase == "Ready" and ceph_health in ("HEALTH_OK", ""):
+            severity = "OK"
+        else:
+            # Progressing/Connecting/Unknown phases, or a HEALTH_WARN ceph
+            # summary, are all worth a human's attention but aren't
+            # necessarily an outage on their own.
+            severity = "WARNING"
+
+        rows.append(
+            {
+                "name": name,
+                "phase": phase or "Unknown",
+                "ceph_health": ceph_health or "Unknown",
+                "last_checked": last_checked,
+                "severity": severity,
+                "messages": messages,
+            }
+        )
+    return sorted(rows, key=lambda r: (-_severity_rank(r["severity"]), r["name"]))
+
+
+def ceph_status_report(raw_status: Any) -> Dict[str, Any]:
+    """Parse a best-effort `ceph status -f json` capture (executed via the
+    rook-ceph-tools pod) into a structured summary: overall health, the
+    individual named health checks Ceph itself is reporting, osdmap up/in
+    counts, a pgmap summary, and mon quorum membership.
+
+    Deliberately parsed here in Python rather than via Jinja `from_json` in
+    the task file - the same defensive-parsing lesson already applied to
+    etcdctl output (_safe_json_list/_safe_json_dict above): `ceph status`
+    returns a JSON OBJECT, and depending on Ansible/Jinja2-native settings a
+    set_fact of that text can already be a native dict by the time it
+    reaches a filter plugin. Never raises - a failed/empty/malformed exec
+    capture (including the "(...)" placeholder text used when the exec call
+    itself failed) degrades to an 'unparsed' report rather than crashing the
+    play, so the raw text captured alongside it remains the source of truth
+    either way."""
+    data = _safe_json_dict(raw_status)
+    if not data:
+        return {
+            "parsed": False,
+            "overall_status": "Unknown",
+            "overall_severity": "WARNING",
+            "checks": [],
+            "osdmap": {},
+            "pgmap": {},
+            "mon": {},
+        }
+
+    health = data.get("health", {}) or {}
+    overall_status = health.get("status", "Unknown")
+    if overall_status == "HEALTH_OK":
+        overall_severity = "OK"
+    elif overall_status == "HEALTH_WARN":
+        overall_severity = "WARNING"
+    elif overall_status == "HEALTH_ERR":
+        overall_severity = "CRITICAL"
+    else:
+        overall_severity = "WARNING"
+
+    checks = []
+    for check_name, check in (health.get("checks") or {}).items():
+        check = check or {}
+        check_severity_raw = check.get("severity", "")
+        message = (check.get("summary") or {}).get("message", "")
+        if check_severity_raw == "HEALTH_ERR":
+            check_severity = "CRITICAL"
+        elif check_severity_raw == "HEALTH_WARN":
+            check_severity = "WARNING"
+        else:
+            check_severity = "OK"
+        checks.append(
+            {
+                "name": check_name,
+                "severity": check_severity,
+                "message": message,
+                "muted": bool(check.get("muted", False)),
+            }
+        )
+    checks.sort(key=lambda c: (-_severity_rank(c["severity"]), c["name"]))
+
+    # osdmap: some Ceph releases nest the counts one level deeper
+    # (osdmap.osdmap.num_osds) - handle both shapes defensively.
+    osdmap = data.get("osdmap", {}) or {}
+    if "num_osds" not in osdmap and isinstance(osdmap.get("osdmap"), dict):
+        osdmap = osdmap["osdmap"]
+    num_osds = osdmap.get("num_osds", 0) or 0
+    num_up_osds = osdmap.get("num_up_osds", 0) or 0
+    num_in_osds = osdmap.get("num_in_osds", 0) or 0
+    osd_severity = "CRITICAL" if num_osds and (num_up_osds < num_osds or num_in_osds < num_osds) else "OK"
+    osdmap_summary = {
+        "num_osds": num_osds,
+        "num_up_osds": num_up_osds,
+        "num_in_osds": num_in_osds,
+        "num_remapped_pgs": osdmap.get("num_remapped_pgs", 0),
+        "severity": osd_severity,
+    }
+
+    pgmap = data.get("pgmap", {}) or {}
+    bytes_used = pgmap.get("bytes_used", 0) or 0
+    bytes_total = pgmap.get("bytes_total", 0) or 0
+    pct_used = round((bytes_used / bytes_total) * 100, 1) if bytes_total else 0.0
+    pgs_by_state = pgmap.get("pgs_by_state", []) or []
+    state_names = {s.get("state_name") for s in pgs_by_state}
+    all_active_clean = bool(pgs_by_state) and state_names <= {"active+clean"}
+    pgmap_summary = {
+        "num_pgs": pgmap.get("num_pgs", 0),
+        "num_pools": pgmap.get("num_pools", 0),
+        "bytes_used": bytes_used,
+        "bytes_avail": pgmap.get("bytes_avail", 0),
+        "bytes_total": bytes_total,
+        "pct_used": pct_used,
+        "pgs_by_state": [{"state": s.get("state_name"), "count": s.get("count", 0)} for s in pgs_by_state],
+        "severity": "OK" if all_active_clean else "WARNING",
+    }
+
+    mon_summary = {
+        "quorum_names": data.get("quorum_names", []) or [],
+        "quorum_count": len(data.get("quorum", []) or []),
+    }
+
+    return {
+        "parsed": True,
+        "overall_status": overall_status,
+        "overall_severity": overall_severity,
+        "checks": checks,
+        "osdmap": osdmap_summary,
+        "pgmap": pgmap_summary,
+        "mon": mon_summary,
+    }
+
+
+# ----------------------------------------------------------------------------
+# 12. Markdown table cell escaping
 # ----------------------------------------------------------------------------
 def md_cell(value: Any) -> str:
     """Escape a value for safe use inside a GFM/CommonMark pipe-table cell:
@@ -1239,5 +1434,7 @@ class FilterModule(object):
             "acm_resolve_cascade_targets": acm_resolve_cascade_targets,
             "resolve_upgrade_channel": resolve_upgrade_channel,
             "cincinnati_shortest_path": cincinnati_shortest_path,
+            "cephcluster_report": cephcluster_report,
+            "ceph_status_report": ceph_status_report,
             "md_cell": md_cell,
         }

@@ -307,6 +307,59 @@ p = f.cincinnati_shortest_path(fx.CINCINNATI_GRAPH_EUS_4_20, "4.20.1", 4, 20)
 check("already at the target version -> found, single-element path, no BFS needed",
       p["found"] is True and p["hops"] == ["4.20.1"] and p["target_version"] == "4.20.1")
 
+# ---- cephcluster_report -----------------------------------------------------
+cc_ready = f.cephcluster_report(fx.CEPHCLUSTER_READY)
+check("cephcluster_report returns 1 row", len(cc_ready) == 1)
+check("Ready phase + HEALTH_OK -> OK", cc_ready[0]["severity"] == "OK")
+
+cc_warn = f.cephcluster_report(fx.CEPHCLUSTER_WARN)
+check("Ready phase + HEALTH_WARN -> WARNING (not OK, not CRITICAL)", cc_warn[0]["severity"] == "WARNING")
+check("CephCluster WARNING messages surface the ceph.details entry", any("1 osds down" in m for m in cc_warn[0]["messages"]))
+
+cc_fail = f.cephcluster_report(fx.CEPHCLUSTER_FAILURE)
+check("Failure phase -> CRITICAL regardless of ceph.health", cc_fail[0]["severity"] == "CRITICAL")
+check("CephCluster CRITICAL messages include the top-level status.message", any("failed to configure" in m for m in cc_fail[0]["messages"]))
+
+check("cephcluster_report on an empty list doesn't crash", f.cephcluster_report([]) == [])
+
+# ---- ceph_status_report -------------------------------------------------------
+cs_ok = f.ceph_status_report(fx.CEPH_STATUS_JSON_OK)
+check("ceph_status_report marks a HEALTH_OK payload parsed=True", cs_ok["parsed"] is True)
+check("HEALTH_OK -> overall_severity OK", cs_ok["overall_severity"] == "OK")
+check("osdmap reflects all 3 OSDs up and in", cs_ok["osdmap"] == {"num_osds": 3, "num_up_osds": 3, "num_in_osds": 3, "num_remapped_pgs": 0, "severity": "OK"})
+check("pgmap marks all-active+clean as OK", cs_ok["pgmap"]["severity"] == "OK")
+check("pgmap computes pct_used correctly (~25%)", 24 <= cs_ok["pgmap"]["pct_used"] <= 26)
+check("mon quorum count matches the quorum list length", cs_ok["mon"]["quorum_count"] == 3)
+check("no health checks when HEALTH_OK", cs_ok["checks"] == [])
+
+cs_warn = f.ceph_status_report(fx.CEPH_STATUS_JSON_WARN_OSD_DOWN)
+check("HEALTH_WARN -> overall_severity WARNING", cs_warn["overall_severity"] == "WARNING")
+check("osdmap flags CRITICAL when an OSD is down (1/3 up) even though ceph's own overall status is only WARN",
+      cs_warn["osdmap"]["severity"] == "CRITICAL")
+check("ceph_status_report surfaces both named health checks", len(cs_warn["checks"]) == 2)
+cs_warn_checks_by_name = {c["name"]: c for c in cs_warn["checks"]}
+check("OSD_DOWN check parsed with its summary message", cs_warn_checks_by_name["OSD_DOWN"]["message"] == "1 osds down")
+check("checks are sorted most-severe first", cs_warn["checks"][0]["severity"] in ("CRITICAL", "WARNING"))
+check("pgmap is WARNING when not all PGs are active+clean", cs_warn["pgmap"]["severity"] == "WARNING")
+
+cs_err = f.ceph_status_report(fx.CEPH_STATUS_JSON_ERR)
+check("HEALTH_ERR -> overall_severity CRITICAL", cs_err["overall_severity"] == "CRITICAL")
+check("osdmap severity CRITICAL when OSDs are both down and out", cs_err["osdmap"]["severity"] == "CRITICAL")
+
+cs_unparsed = f.ceph_status_report(fx.CEPH_STATUS_EXEC_FAILED_PLACEHOLDER)
+check("an exec-failed placeholder string degrades to parsed=False, not a crash", cs_unparsed["parsed"] is False)
+check("an unparsed report still has a sane (non-crashing) shape", cs_unparsed["osdmap"] == {} and cs_unparsed["checks"] == [])
+
+cs_from_raw_json_string = f.ceph_status_report(json.dumps(fx.CEPH_STATUS_JSON_OK))
+check("ceph_status_report parses a raw JSON *string* the same as an already-native dict",
+      cs_from_raw_json_string["overall_status"] == cs_ok["overall_status"] and cs_from_raw_json_string["osdmap"] == cs_ok["osdmap"])
+
+cs_empty = f.ceph_status_report({})
+check("an empty dict input degrades to parsed=False, not a crash", cs_empty["parsed"] is False)
+
+cs_malformed = f.ceph_status_report("not json at all {{{")
+check("genuinely malformed JSON text degrades to parsed=False, not a crash", cs_malformed["parsed"] is False)
+
 print()
 if failures:
     print(f"{len(failures)} check(s) FAILED:")

@@ -176,6 +176,13 @@ acm_cascade_upgrade_target_version: ""     # usually leave blank - spokes are of
                                             # versions/timelines than the hub; set per-cluster by hand
                                             # if you actually want the update-path check run identically
                                             # everywhere
+acm_cascade_upgrade_channel: ""            # leave blank (default) to auto-forward the outer run's own
+                                            # upgrade_channel (e.g. "eus") to every cascaded child - unlike
+                                            # a fixed upgrade_target_version, a CHANNEL is relative and each
+                                            # child resolves it against its OWN current_version, so the same
+                                            # channel string is correct even across spokes on different
+                                            # versions. Set this only if cascaded clusters should use a
+                                            # DIFFERENT channel than the hub itself.
 
 # --- credential resolution, in preference order ------------------------------
 acm_prefer_hive_kubeconfig: true    # prefer the Hive admin-kubeconfig secret over a
@@ -232,7 +239,20 @@ acm_cascade_debug: false             # The two tasks that write per-cluster kube
                                       # back off (or just don't set it) afterwards.
 
 # -----------------------------------------------------------------------------
-# 9. Report / behavior
+# 9. OpenShift Data Foundation (ODF/OCS) - Ceph-backed storage layer
+# -----------------------------------------------------------------------------
+odf_enabled: true                   # set false to skip this section entirely on clusters without ODF/OCS
+odf_namespace: "openshift-storage"
+odf_storagecluster_name: ""         # leave blank to auto-discover the (single) StorageCluster CR
+odf_cephcluster_name: ""            # leave blank to auto-discover the (single) CephCluster CR
+odf_osd_pod_selector: "app=rook-ceph-osd"     # label selector for the individual OSD pods
+odf_tools_pod_selector: "app=rook-ceph-tools" # the RO diagnostic pod ODF ships for `ceph`/`rados` exec commands
+odf_tools_container: "rook-ceph-tools"
+odf_exec_enabled: true              # set false to skip `ceph` exec calls via rook-ceph-tools (CR-only checks still run)
+odf_exec_timeout: 30
+
+# -----------------------------------------------------------------------------
+# 10. Report / behavior
 # -----------------------------------------------------------------------------
 report_output_dir: "{{ playbook_dir }}/reports"
 report_basename: "ocp-preupgrade-health-{{ cluster_id_short | default('cluster') }}-{{ report_timestamp }}"

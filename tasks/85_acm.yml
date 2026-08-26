@@ -209,21 +209,32 @@
 
                 # The child is a fresh `ansible-playbook` process - it does NOT inherit
                 # -e flags from the outer command line, only what's written into its
-                # own extra-vars file below. ansible_python_interpreter is the one that
-                # bites people in practice (pyenv/virtualenv setups where the
-                # `kubernetes`/`openshift` pip libraries live in a venv that isn't the
-                # interpreter Ansible would auto-discover), so it's forwarded
-                # unconditionally, using whatever this OUTER run actually resolved
-                # (inventory default, or your own -e override - either way, the same
-                # value the parent just proved works). acm_cascade_extra_vars (see
-                # group_vars/all.yml) is merged in last so it can add or override
-                # anything here, including the auto-forwarded interpreter.
+                # own extra-vars file below. Two vars are auto-forwarded from whatever
+                # this OUTER run actually resolved them to (inventory default, or your
+                # own -e override - either way, the same value the parent just proved
+                # works), rather than requiring acm_cascade_extra_vars for them:
+                #   - ansible_python_interpreter - the one that bites people in practice
+                #     (pyenv/virtualenv setups where the `kubernetes`/`openshift` pip
+                #     libraries live in a venv that isn't the interpreter Ansible would
+                #     auto-discover).
+                #   - upgrade_channel - a CHANNEL (e.g. "eus") is relative, unlike a
+                #     fixed upgrade_target_version: each cascaded child resolves it
+                #     against ITS OWN current_version, so forwarding the same channel
+                #     string to every managed cluster is correct even when they're on
+                #     different versions - that's exactly what upgrade_target_version
+                #     (deliberately NOT auto-forwarded; see acm_cascade_upgrade_target_version
+                #     below) can't do safely. Override with acm_cascade_upgrade_channel
+                #     if cascaded clusters should use a different channel than the hub.
+                # acm_cascade_extra_vars (see group_vars/all.yml) is merged in last so
+                # it can add or override anything here, including both auto-forwarded
+                # values.
                 #
                 # NOTE: the `_extra_vars` Jinja expression below is a single {{ ... }}
                 # block - Jinja expression syntax has no `#` comment form, so don't add
                 # inline comments inside it (only outside, like this one); a `#` inside
-                # `{{ }}` is a template syntax error that this task's `no_log: true`
-                # will then hide behind a "censored" message.
+                # `{{ }}` is a template syntax error that this task's templated `no_log`
+                # will then hide behind a "censored" message unless acm_cascade_debug
+                # is set to true for that one re-run.
                 - name: Write per-cluster extra-vars files (one child ansible-playbook invocation per cluster)
                   ansible.builtin.copy:
                     content: "{{ _extra_vars | to_nice_json }}"
@@ -234,6 +245,7 @@
                     label: "{{ item.name }}"
                     loop_var: item
                   no_log: "{{ not (acm_cascade_debug | default(false) | bool) }}"
+                  delegate_to: localhost
                   vars:
                     _report_basename: "ocp-preupgrade-health-{{ item.name }}-{{ report_timestamp }}"
                     _extra_vars: >-
@@ -245,6 +257,7 @@
                           'ocp_api_token': item.token if item.auth_method == 'token' else '',
                           'ocp_validate_certs': acm_cascade_validate_certs,
                           'upgrade_target_version': acm_cascade_upgrade_target_version,
+                          'upgrade_channel': acm_cascade_upgrade_channel if acm_cascade_upgrade_channel | length > 0 else upgrade_channel,
                           'report_output_dir': acm_cascade_report_dir,
                           'report_basename': _report_basename,
                           'fail_on_critical': acm_cascade_fail_on_critical,
@@ -252,8 +265,6 @@
                           'ansible_python_interpreter': ansible_python_interpreter,
                         } | combine(acm_cascade_extra_vars | default({}))
                       }}
-                  delegate_to: localhost
-                  no_log: true
 
                 - name: Ensure the per-cluster report output directory exists
                   ansible.builtin.file:

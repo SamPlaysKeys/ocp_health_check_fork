@@ -37,6 +37,9 @@ etcd_health_data = f.etcd_health_report(
     fx.ETCD_PODS, fx.ETCD_HEALTH_SLOW_AND_DOWN, fx.ETCD_STATUS_DB_NEAR_QUOTA, fx.ETCD_ALARM_NOSPACE,
     8589934592, 0.8, 0.95, 50, 300,
 )
+odf_component_report = f.co_report(fx.ODF_STORAGECLUSTER_DEGRADED)
+odf_cephcluster_report = f.cephcluster_report(fx.CEPHCLUSTER_WARN)
+ceph_status_report_data = f.ceph_status_report(fx.CEPH_STATUS_JSON_WARN_OSD_DOWN)
 acm_mch_report = f.acm_hub_report(fx.MCH_RUNNING)
 acm_managed_clusters_report = f.acm_managed_cluster_report(fx.MANAGED_CLUSTERS)
 acm_cascade_targets = f.acm_resolve_cascade_targets(
@@ -104,6 +107,14 @@ for row in acm_cascade_results:
     if row["overall_status"] == "CRITICAL":
         findings.append({"section": f"ACM cascade result ({row['cluster_name']})", "severity": "CRITICAL",
                           "summary": f"{row['critical_count']} CRITICAL finding(s)"})
+for row in odf_cephcluster_report:
+    if row["severity"] != "OK":
+        findings.append({"section": f"ODF CephCluster ({row['name']})", "severity": row["severity"],
+                          "summary": f"phase={row['phase']} ceph_health={row['ceph_health']}"})
+for chk in ceph_status_report_data["checks"]:
+    if chk["severity"] != "OK":
+        findings.append({"section": f"Ceph health check ({chk['name']})", "severity": chk["severity"],
+                          "summary": chk["message"]})
 
 context = dict(
     cluster_id=fx.CLUSTERVERSION["spec"]["clusterID"],
@@ -182,6 +193,23 @@ context = dict(
     acm_cascade_targets=acm_cascade_targets,
     acm_cascade_results=acm_cascade_results,
     acm_cascade_report_dir="/path/to/reports/acm-managed-clusters",
+    odf_enabled=True,
+    odf_namespace="openshift-storage",
+    odf_storagecluster_list=fx.ODF_STORAGECLUSTER_DEGRADED,
+    odf_sc_name="ocs-storagecluster",
+    odf_component_report=odf_component_report,
+    odf_cephcluster_list=fx.CEPHCLUSTER_WARN,
+    odf_cephcluster_report=odf_cephcluster_report,
+    odf_osd_pods=fx.ODF_OSD_PODS_ONE_DOWN,
+    ceph_status_report_data=ceph_status_report_data,
+    ceph_status_output='{"health":{"status":"HEALTH_WARN"}, ...}',
+    ceph_osd_status_output="ID  HOST      USED  AVAIL  WR OPS  WR DATA  RD OPS  RD DATA  STATE\n 0  worker-0  10G   90G    0       0        0       0        exists,up\n 1  worker-1  10G   90G    0       0        0       0        exists\n 2  worker-2  10G   90G    0       0        0       0        exists,up",
+    ceph_df_output="--- RAW STORAGE ---\nCLASS   SIZE   AVAIL   USED  RAW USED  %RAW USED\nssd    120GiB  90GiB   30GiB   30GiB      25.00",
+    ceph_health_detail_output="HEALTH_WARN 1 osds down; Degraded data redundancy: 320/15000 objects degraded (2.1%), 4 pgs degraded\n[WRN] OSD_DOWN: 1 osds down\n    osd.1 (root=default,host=worker-1) is down",
+    odf_manual_checklist=[
+        "Confirm the installed ODF/OCS Operator version supports 4.17 in Red Hat's ODF-OCP interoperability matrix.",
+        "Review the captured ceph df output for pool/cluster capacity headroom before upgrading.",
+    ],
 )
 
 critical_findings = [x for x in findings if x["severity"] == "CRITICAL"]

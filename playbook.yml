@@ -74,6 +74,10 @@
       ansible.builtin.include_tasks: tasks/85_acm.yml
       tags: [acm]
 
+    - name: 87 - OpenShift Data Foundation (ODF/OCS) + Ceph storage checks
+      ansible.builtin.include_tasks: tasks/87_odf.yml
+      tags: [odf, storage]
+
     - name: 90 - Render reports and evaluate overall readiness
       ansible.builtin.include_tasks: tasks/90_render_report.yml
       tags: [report, always]

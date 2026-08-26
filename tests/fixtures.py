@@ -442,3 +442,114 @@ CINCINNATI_GRAPH_STABLE_4_19 = {
     ],
     "edges": [[0, 1], [1, 2], [2, 3]],
 }
+
+# ---- OpenShift Data Foundation (ODF/OCS) + Ceph ------------------------------
+ODF_STORAGECLUSTER_HEALTHY = [
+    {"metadata": {"name": "ocs-storagecluster", "namespace": "openshift-storage"},
+     "status": {"versions": [{"name": "operator", "version": "4.16.5"}],
+                "conditions": [{"type": "Available", "status": "True"}, {"type": "Progressing", "status": "False"},
+                                {"type": "Degraded", "status": "False"}, {"type": "Upgradeable", "status": "True"}]}},
+]
+
+ODF_STORAGECLUSTER_DEGRADED = [
+    {"metadata": {"name": "ocs-storagecluster", "namespace": "openshift-storage"},
+     "status": {"versions": [{"name": "operator", "version": "4.16.5"}],
+                "conditions": [{"type": "Available", "status": "True"}, {"type": "Progressing", "status": "True"},
+                                {"type": "Degraded", "status": "True", "message": "waiting on CephCluster health"},
+                                {"type": "Upgradeable", "status": "True"}]}},
+]
+
+CEPHCLUSTER_READY = [
+    {"metadata": {"name": "ocs-storagecluster-cephcluster", "namespace": "openshift-storage"},
+     "status": {"phase": "Ready",
+                "ceph": {"health": "HEALTH_OK", "lastChecked": "2026-08-23T20:00:00Z", "details": {}}}},
+]
+
+CEPHCLUSTER_WARN = [
+    {"metadata": {"name": "ocs-storagecluster-cephcluster", "namespace": "openshift-storage"},
+     "status": {"phase": "Ready",
+                "ceph": {"health": "HEALTH_WARN", "lastChecked": "2026-08-23T20:00:00Z",
+                         "details": {"OSD_DOWN": {"message": "1 osds down", "severity": "HEALTH_WARN"}}}}},
+]
+
+CEPHCLUSTER_FAILURE = [
+    {"metadata": {"name": "ocs-storagecluster-cephcluster", "namespace": "openshift-storage"},
+     "status": {"phase": "Failure", "message": "failed to configure ceph cluster",
+                "ceph": {"health": "HEALTH_ERR", "lastChecked": "2026-08-23T20:00:00Z",
+                         "details": {"OSD_DOWN": {"message": "2 osds down", "severity": "HEALTH_ERR"}}}}},
+]
+
+ODF_OSD_PODS_HEALTHY = [
+    {"metadata": {"name": "rook-ceph-osd-0"}, "spec": {"nodeName": "worker-0"}, "status": {"phase": "Running"}},
+    {"metadata": {"name": "rook-ceph-osd-1"}, "spec": {"nodeName": "worker-1"}, "status": {"phase": "Running"}},
+    {"metadata": {"name": "rook-ceph-osd-2"}, "spec": {"nodeName": "worker-2"}, "status": {"phase": "Running"}},
+]
+
+ODF_OSD_PODS_ONE_DOWN = [
+    {"metadata": {"name": "rook-ceph-osd-0"}, "spec": {"nodeName": "worker-0"}, "status": {"phase": "Running"}},
+    {"metadata": {"name": "rook-ceph-osd-1"}, "spec": {"nodeName": "worker-1"}, "status": {"phase": "CrashLoopBackOff"}},
+    {"metadata": {"name": "rook-ceph-osd-2"}, "spec": {"nodeName": "worker-2"}, "status": {"phase": "Running"}},
+]
+
+# Synthetic `ceph status -f json` output. Shapes mirror real Ceph output
+# closely enough to exercise ceph_status_report()'s parsing - see that
+# function's docstring for why this is parsed defensively in Python rather
+# than via Jinja from_json (same lesson as etcdctl's -w json output).
+CEPH_STATUS_JSON_OK = {
+    "fsid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "health": {"status": "HEALTH_OK", "checks": {}, "mutes": []},
+    "election_epoch": 12,
+    "quorum": [0, 1, 2],
+    "quorum_names": ["a", "b", "c"],
+    "osdmap": {"epoch": 100, "num_osds": 3, "num_up_osds": 3, "num_in_osds": 3, "num_remapped_pgs": 0},
+    "pgmap": {
+        "pgs_by_state": [{"state_name": "active+clean", "count": 96}],
+        "num_pgs": 96, "num_pools": 5, "num_objects": 15000,
+        "bytes_used": 32212254720, "bytes_avail": 96636764160, "bytes_total": 128849018880,
+    },
+}
+
+CEPH_STATUS_JSON_WARN_OSD_DOWN = {
+    "fsid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "health": {
+        "status": "HEALTH_WARN",
+        "checks": {
+            "OSD_DOWN": {"severity": "HEALTH_WARN", "summary": {"message": "1 osds down", "count": 1}, "muted": False},
+            "PG_DEGRADED": {"severity": "HEALTH_WARN", "summary": {"message": "Degraded data redundancy: 320/15000 objects degraded (2.1%), 4 pgs degraded"}, "muted": False},
+        },
+        "mutes": [],
+    },
+    "election_epoch": 12,
+    "quorum": [0, 1, 2],
+    "quorum_names": ["a", "b", "c"],
+    "osdmap": {"epoch": 104, "num_osds": 3, "num_up_osds": 2, "num_in_osds": 3, "num_remapped_pgs": 4},
+    "pgmap": {
+        "pgs_by_state": [{"state_name": "active+clean", "count": 92}, {"state_name": "active+degraded", "count": 4}],
+        "num_pgs": 96, "num_pools": 5, "num_objects": 15000,
+        "bytes_used": 32212254720, "bytes_avail": 96636764160, "bytes_total": 128849018880,
+    },
+}
+
+CEPH_STATUS_JSON_ERR = {
+    "fsid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "health": {
+        "status": "HEALTH_ERR",
+        "checks": {
+            "OSD_DOWN": {"severity": "HEALTH_ERR", "summary": {"message": "2 osds down", "count": 2}, "muted": False},
+            "PG_AVAILABILITY": {"severity": "HEALTH_ERR", "summary": {"message": "Reduced data availability: 8 pgs inactive"}, "muted": False},
+        },
+        "mutes": [],
+    },
+    "election_epoch": 13,
+    "quorum": [0, 1],
+    "quorum_names": ["a", "b"],
+    "osdmap": {"epoch": 110, "num_osds": 3, "num_up_osds": 1, "num_in_osds": 1, "num_remapped_pgs": 20},
+    "pgmap": {
+        "pgs_by_state": [{"state_name": "active+clean", "count": 80}, {"state_name": "inactive", "count": 8},
+                          {"state_name": "active+undersized", "count": 8}],
+        "num_pgs": 96, "num_pools": 5, "num_objects": 15000,
+        "bytes_used": 32212254720, "bytes_avail": 96636764160, "bytes_total": 128849018880,
+    },
+}
+
+CEPH_STATUS_EXEC_FAILED_PLACEHOLDER = "(ceph status exec failed or was skipped - review manually)"

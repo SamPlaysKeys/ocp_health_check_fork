@@ -1,0 +1,298 @@
+---
+# OpenShift Data Foundation (ODF/OCS) pre-upgrade checks.
+#
+# What this automates (read-only, via the Kubernetes/OpenShift API):
+#   - StorageCluster CR (ocs.openshift.io/v1) condition health - reuses
+#     co_report() since it follows the same Available/Progressing/Degraded/
+#     Upgradeable convention already relied upon for CNV's HCO/KubeVirt/CDI
+#   - CephCluster CR (ceph.rook.io/v1) phase + Rook's own ceph.health summary
+#     (a separate report shape - see cephcluster_report() - this CR does NOT
+#     follow the ClusterOperator condition convention)
+#   - rook-ceph-osd pod health (one pod per OSD)
+#   - best-effort `ceph status -f json` via exec into the rook-ceph-tools
+#     pod, parsed into overall health / individual health checks / osdmap
+#     up-in counts / pgmap summary / mon quorum
+#   - best-effort raw (unparsed) `ceph osd status`, `ceph df`, and
+#     `ceph health detail` captures, for a human to read directly
+#
+# What this DOES NOT fully automate (Ceph/ODF internals are opaque to us):
+#   - pool replication/EC profile correctness, MDS (CephFS) and RGW (object)
+#     subsystem health beyond what `ceph status` itself surfaces, in-flight
+#     backfill/recovery ETA, and ODF<->OCP compatibility-matrix validation.
+#   These are called out as manual checklist items in the report, with the
+#   captured `ceph status`/`ceph osd status`/`ceph df`/`ceph health detail`
+#   output above so a human can confirm them quickly. See:
+#     https://access.redhat.com/documentation/en-us/red_hat_openshift_data_foundation
+#     https://access.redhat.com/articles/5001441 (ODF-OCP interoperability matrix)
+- name: Seed OpenShift Data Foundation (ODF) report variables so the templates render even when disabled/skipped
+  ansible.builtin.set_fact:
+    odf_storagecluster_list: []
+    odf_sc_name: ""
+    odf_component_report: []
+    odf_cephcluster_list: []
+    odf_cephcluster_report: []
+    odf_osd_pods: []
+    ceph_status_report_data: {}
+    ceph_status_output: "(ODF checks were skipped - odf_enabled=false)"
+    ceph_osd_status_output: "(ODF checks were skipped - odf_enabled=false)"
+    ceph_df_output: "(ODF checks were skipped - odf_enabled=false)"
+    ceph_health_detail_output: "(ODF checks were skipped - odf_enabled=false)"
+    odf_manual_checklist: []
+
+- name: OpenShift Data Foundation (ODF) checks
+  when: odf_enabled | bool
+  block:
+    - name: Discover StorageCluster CR(s)
+      kubernetes.core.k8s_info:
+        api_version: ocs.openshift.io/v1
+        kind: StorageCluster
+        namespace: "{{ odf_namespace }}"
+        name: "{{ odf_storagecluster_name | default(omit) }}"
+      register: _odf_sc_raw
+      ignore_errors: true
+
+    - name: Record whether ODF is actually present
+      ansible.builtin.set_fact:
+        odf_storagecluster_list: "{{ _odf_sc_raw.resources | default([]) }}"
+
+    - name: Flag when ODF is enabled in vars but no StorageCluster CR was found
+      ansible.builtin.set_fact:
+        findings: "{{ findings + [{
+            'section': 'OpenShift Data Foundation',
+            'severity': 'WARNING',
+            'summary': 'odf_enabled=true but no StorageCluster CR was found in namespace ' ~ odf_namespace ~ ' - set odf_enabled=false if this cluster does not run ODF/OCS, or fix odf_namespace/odf_storagecluster_name.',
+          }] }}"
+      when: odf_storagecluster_list | length == 0
+
+    - name: ODF detail checks (only when a StorageCluster CR exists)
+      when: odf_storagecluster_list | length > 0
+      block:
+        - name: Select the StorageCluster to report on
+          ansible.builtin.set_fact:
+            odf_sc: "{{ odf_storagecluster_list[0] }}"
+            odf_sc_name: "{{ odf_storagecluster_list[0].metadata.name }}"
+
+        - name: Warn if more than one StorageCluster CR was found
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'OpenShift Data Foundation',
+                'severity': 'WARNING',
+                'summary': (odf_storagecluster_list | length | string) ~ ' StorageCluster CRs found in ' ~ odf_namespace ~ ' - reporting on ' ~ odf_sc_name ~ ' only. Set odf_storagecluster_name to pick a specific one.',
+              }] }}"
+          when: odf_storagecluster_list | length > 1
+
+        - name: Build the StorageCluster component health report (shares the Available/Progressing/Degraded/Upgradeable condition convention with CNV's HCO/KubeVirt/CDI)
+          ansible.builtin.set_fact:
+            odf_component_report: "{{ [odf_sc] | co_report }}"
+
+        - name: Append findings for a non-OK StorageCluster
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'ODF StorageCluster (' ~ item.name ~ ')',
+                'severity': item.severity,
+                'summary': item.name ~ ' Available=' ~ item.available ~ ' Progressing=' ~ item.progressing
+                           ~ ' Degraded=' ~ item.degraded ~ ' Upgradeable=' ~ item.upgradeable
+                           ~ (' - ' ~ (item.messages | join(' | ')) if item.messages else ''),
+              }] }}"
+          loop: "{{ odf_component_report | rejectattr('severity', 'equalto', 'OK') | list }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Get the CephCluster CR (usually named the same as the StorageCluster)
+          kubernetes.core.k8s_info:
+            api_version: ceph.rook.io/v1
+            kind: CephCluster
+            namespace: "{{ odf_namespace }}"
+            name: "{{ odf_cephcluster_name | default(omit) }}"
+          register: _odf_cephcluster_raw
+          ignore_errors: true
+
+        - name: Build the CephCluster report (does NOT follow the ClusterOperator condition convention - handled separately from co_report)
+          ansible.builtin.set_fact:
+            odf_cephcluster_list: "{{ _odf_cephcluster_raw.resources | default([]) }}"
+            odf_cephcluster_report: "{{ (_odf_cephcluster_raw.resources | default([])) | cephcluster_report }}"
+
+        - name: Flag when no CephCluster CR was found alongside an existing StorageCluster
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'OpenShift Data Foundation',
+                'severity': 'WARNING',
+                'summary': 'a StorageCluster CR exists but no CephCluster CR was found in ' ~ odf_namespace ~ ' - the Ceph layer may still be initializing, or odf_cephcluster_name needs to be set.',
+              }] }}"
+          when: odf_cephcluster_list | length == 0
+
+        - name: Append findings for a non-OK CephCluster
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'ODF CephCluster (' ~ item.name ~ ')',
+                'severity': item.severity,
+                'summary': item.name ~ ' phase=' ~ item.phase ~ ' ceph_health=' ~ item.ceph_health
+                           ~ (' - ' ~ (item.messages | join(' | ')) if item.messages else ''),
+              }] }}"
+          loop: "{{ odf_cephcluster_report | rejectattr('severity', 'equalto', 'OK') | list }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Get rook-ceph-osd pods (one per OSD)
+          kubernetes.core.k8s_info:
+            kind: Pod
+            namespace: "{{ odf_namespace }}"
+            label_selectors:
+              - "{{ odf_osd_pod_selector }}"
+          register: _odf_osd_pods_raw
+          ignore_errors: true
+
+        - name: Evaluate rook-ceph-osd pod health
+          ansible.builtin.set_fact:
+            odf_osd_pods: "{{ _odf_osd_pods_raw.resources | default([]) }}"
+
+        - name: Append findings for non-Running OSD pods
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'ODF OSD pods',
+                'severity': 'CRITICAL',
+                'summary': item.metadata.name ~ ' on ' ~ (item.spec.nodeName | default('?')) ~ ' phase=' ~ item.status.phase,
+              }] }}"
+          loop: "{{ odf_osd_pods }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+          when: item.status.phase | default('Unknown') != 'Running'
+
+        - name: Note that ceph exec was skipped by configuration
+          ansible.builtin.set_fact:
+            ceph_status_output: "(odf_exec_enabled=false - skipped, review `ceph status` manually)"
+            ceph_osd_status_output: "(odf_exec_enabled=false - skipped, review `ceph osd status` manually)"
+            ceph_df_output: "(odf_exec_enabled=false - skipped, review `ceph df` manually)"
+            ceph_health_detail_output: "(odf_exec_enabled=false - skipped, review `ceph health detail` manually)"
+          when: not (odf_exec_enabled | bool)
+
+        - name: Best-effort - run read-only `ceph` commands via the rook-ceph-tools pod
+          when: odf_exec_enabled | bool
+          block:
+            - name: Find a Running rook-ceph-tools pod to exec into
+              kubernetes.core.k8s_info:
+                kind: Pod
+                namespace: "{{ odf_namespace }}"
+                label_selectors:
+                  - "{{ odf_tools_pod_selector }}"
+              register: _odf_tools_pods_raw
+              ignore_errors: true
+
+            - name: Pick a Running rook-ceph-tools pod
+              ansible.builtin.set_fact:
+                odf_tools_pod: "{{ (_odf_tools_pods_raw.resources | default([]) | selectattr('status.phase', 'equalto', 'Running') | map(attribute='metadata.name') | list | first) | default('') }}"
+
+            - name: Flag when odf_exec_enabled=true but no rook-ceph-tools pod is available
+              ansible.builtin.set_fact:
+                findings: "{{ findings + [{
+                    'section': 'OpenShift Data Foundation',
+                    'severity': 'WARNING',
+                    'summary': 'odf_exec_enabled=true but no Running rook-ceph-tools pod was found in ' ~ odf_namespace ~ ' (label ' ~ odf_tools_pod_selector ~ ') - ceph status/osd status/df could not be captured. Enable the toolbox (ocs-operator ` rook-ceph-tools` overlay / `oc -n ' ~ odf_namespace ~ ' patch ocsinitialization ocsinit --type merge -p ...enableCephTools:true`) and re-run.',
+                  }] }}"
+              when: odf_tools_pod | length == 0
+
+            - name: Ceph read-only commands (only when a rook-ceph-tools pod is available)
+              when: odf_tools_pod | length > 0
+              block:
+                - name: ceph status -f json
+                  kubernetes.core.k8s_exec:
+                    namespace: "{{ odf_namespace }}"
+                    pod: "{{ odf_tools_pod }}"
+                    container: "{{ odf_tools_container }}"
+                    command: ceph status -f json
+                  register: _ceph_status_json
+                  ignore_errors: true
+
+                - name: ceph osd status
+                  kubernetes.core.k8s_exec:
+                    namespace: "{{ odf_namespace }}"
+                    pod: "{{ odf_tools_pod }}"
+                    container: "{{ odf_tools_container }}"
+                    command: ceph osd status
+                  register: _ceph_osd_status
+                  ignore_errors: true
+
+                - name: ceph df
+                  kubernetes.core.k8s_exec:
+                    namespace: "{{ odf_namespace }}"
+                    pod: "{{ odf_tools_pod }}"
+                    container: "{{ odf_tools_container }}"
+                    command: ceph df
+                  register: _ceph_df
+                  ignore_errors: true
+
+                - name: ceph health detail
+                  kubernetes.core.k8s_exec:
+                    namespace: "{{ odf_namespace }}"
+                    pod: "{{ odf_tools_pod }}"
+                    container: "{{ odf_tools_container }}"
+                    command: ceph health detail
+                  register: _ceph_health_detail
+                  ignore_errors: true
+
+                # Parsed in Python (never via Jinja from_json) - same
+                # defensive-parsing lesson already applied to etcdctl JSON
+                # output (see ceph_status_report()'s docstring).
+                - name: Parse ceph status output into a structured report
+                  ansible.builtin.set_fact:
+                    ceph_status_report_data: "{{ (_ceph_status_json.stdout | default('')) | ceph_status_report }}"
+                  when: _ceph_status_json is defined and not (_ceph_status_json is failed)
+
+                - name: Save raw ceph command output for the report (best-effort, not parsed further)
+                  ansible.builtin.set_fact:
+                    ceph_status_output: "{{ _ceph_status_json.stdout | default('') if _ceph_status_json is defined and not (_ceph_status_json is failed) else '(ceph status exec failed or was skipped - review manually)' }}"
+                    ceph_osd_status_output: "{{ _ceph_osd_status.stdout | default('') if _ceph_osd_status is defined and not (_ceph_osd_status is failed) else '(ceph osd status exec failed or was skipped - review manually)' }}"
+                    ceph_df_output: "{{ _ceph_df.stdout | default('') if _ceph_df is defined and not (_ceph_df is failed) else '(ceph df exec failed or was skipped - review manually)' }}"
+                    ceph_health_detail_output: "{{ _ceph_health_detail.stdout | default('') if _ceph_health_detail is defined and not (_ceph_health_detail is failed) else '(ceph health detail exec failed or was skipped - review manually)' }}"
+
+                - name: Append a finding summarizing overall ceph status
+                  ansible.builtin.set_fact:
+                    findings: "{{ findings + [{
+                        'section': 'Ceph cluster health',
+                        'severity': ceph_status_report_data.overall_severity,
+                        'summary': 'ceph status=' ~ ceph_status_report_data.overall_status ~ ' (osds ' ~ ceph_status_report_data.osdmap.num_up_osds ~ '/' ~ ceph_status_report_data.osdmap.num_osds ~ ' up, ' ~ ceph_status_report_data.osdmap.num_in_osds ~ '/' ~ ceph_status_report_data.osdmap.num_osds ~ ' in)',
+                      }] }}"
+                  when: ceph_status_report_data.parsed | default(false)
+
+                - name: Append findings for individual non-OK ceph health checks
+                  ansible.builtin.set_fact:
+                    findings: "{{ findings + [{
+                        'section': 'Ceph health check (' ~ item.name ~ ')',
+                        'severity': item.severity,
+                        'summary': item.name ~ (' [muted]' if item.muted else '') ~ ': ' ~ item.message,
+                      }] }}"
+                  loop: "{{ ceph_status_report_data.checks | default([]) | rejectattr('severity', 'equalto', 'OK') | list }}"
+                  loop_control:
+                    label: "{{ item.name }}"
+                  when: ceph_status_report_data.parsed | default(false)
+
+                - name: Compare Ceph's own OSD up/in counts against the rook-ceph-osd pod count
+                  ansible.builtin.set_fact:
+                    findings: "{{ findings + [{
+                        'section': 'ODF OSD pods',
+                        'severity': 'WARNING',
+                        'summary': (odf_osd_pods | length | string) ~ ' rook-ceph-osd pod(s) vs osdmap num_osds=' ~ ceph_status_report_data.osdmap.num_osds ~ ' - counts should match; investigate the gap before upgrading.',
+                      }] }}"
+                  when:
+                    - ceph_status_report_data.parsed | default(false)
+                    - ceph_status_report_data.osdmap.num_osds | default(0) | int != odf_osd_pods | length
+
+                - name: Note if the ceph status parse itself failed (raw output above is still authoritative)
+                  ansible.builtin.set_fact:
+                    findings: "{{ findings + [{
+                        'section': 'Ceph cluster health',
+                        'severity': 'WARNING',
+                        'summary': '`ceph status -f json` could not be parsed into a structured report - review the raw ceph status/osd status/df output captured in the report instead.',
+                      }] }}"
+                  when: not (ceph_status_report_data.parsed | default(false))
+
+        - name: Manual checklist notes (cannot be safely automated from here)
+          ansible.builtin.set_fact:
+            odf_manual_checklist:
+              - "Confirm the installed ODF/OCS Operator version supports your upgrade_target_version in Red Hat's ODF-OCP interoperability matrix: https://access.redhat.com/articles/5001441"
+              - "Red Hat recommends upgrading ODF itself to a version that supports the target OCP release BEFORE upgrading OpenShift (same ordering guidance as Portworx above)."
+              - "Review the captured `ceph status` / `ceph health detail` output above for any HEALTH_WARN/HEALTH_ERR checks not already surfaced as findings (e.g. clock skew, pool near-full, degraded/misplaced PGs, MDS/RGW-specific warnings)."
+              - "Review the captured `ceph df` output for pool/cluster capacity headroom - do not start the upgrade with a pool at or near full (`osd_backfill_full_ratio`/`osd_full_ratio` will start rejecting writes)."
+              - "Review the captured `ceph osd status` output for any OSD that is up but not in, or reweighted to 0 - both are silent capacity/redundancy loss even when the pod itself is Running."
+              - "Confirm no scrub/deep-scrub or backfill/recovery operation is expected to still be running when node drains begin - a draining OSD node during active recovery increases the risk of a PG going inactive."
+              - "If MDS (CephFS) or RGW (object) subsystems are in use, check their own pod health and `ceph fs status` / `radosgw-admin` separately - this module focuses on the core Ceph/OSD layer and the StorageCluster/CephCluster CRs."

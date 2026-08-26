@@ -10,7 +10,9 @@ cluster's readiness for an upgrade and produces three report artifacts:
 | `reports/*.summary.html` | Compact HTML fragment/widget, embed via `<iframe>` in a dashboard/ticket |
 
 It never modifies the cluster - every task is a `k8s_info` read or (optionally)
-a `pxctl status`/`pxctl license list` exec into an existing Portworx pod.
+a `pxctl status`/`pxctl license list` exec into an existing Portworx pod, or a
+read-only `ceph status`/`ceph osd status`/`ceph df`/`ceph health detail` exec
+into an existing ODF `rook-ceph-tools` pod.
 
 ## What it checks
 
@@ -85,6 +87,16 @@ a `pxctl status`/`pxctl license list` exec into an existing Portworx pod.
     [ACM notes](#acm-notes) below - this is the one place the project can
     write to a cluster (an opt-in ManagedServiceAccount), so read that
     section before turning the cascade on.
+12. **OpenShift Data Foundation (ODF)** - validates the operator is actually
+    installed (StorageCluster CR presence, same pattern as Portworx above),
+    then checks StorageCluster component health (reuses the ClusterOperator-
+    style `co_report`), the CephCluster CR's own phase + `ceph.health`
+    summary, `rook-ceph-osd` pod health, and - best-effort, via `oc exec` into
+    the existing `rook-ceph-tools` pod - a structured `ceph status -f json`
+    parse (overall health, individual named health checks, OSD up/in counts,
+    PG summary, mon quorum) plus raw `ceph osd status`/`ceph df`/`ceph health
+    detail` captures for a human to read directly. See
+    [ODF notes](#odf-notes) below for what is *not* automated.
 
 Every non-OK result becomes a `finding` with a severity
 (`CRITICAL`/`WARNING`/`INFO`); the play fails at the end if any `CRITICAL`
@@ -101,9 +113,10 @@ pip install -r requirements.txt --break-system-packages   # kubernetes python cl
 Needs `ansible-core >= 2.15` and `kubernetes.core >= 3.0`. The account you
 connect with needs at least `cluster-reader` (read access to nodes,
 clusteroperators, machineconfigpools, machinesets/machines, apirequestcounts,
-and the Portworx CRs/pods if `portworx_enabled: true`) **plus** `pods/exec`
-in the `openshift-etcd` namespace for the etcd checks - `cluster-reader`
-alone does not grant exec. The `Infrastructure` and `Console` singletons read
+and the Portworx/ODF CRs and pods if `portworx_enabled`/`odf_enabled: true`)
+**plus** `pods/exec` in the `openshift-etcd` namespace for the etcd checks,
+and in the `openshift-storage` namespace for the ODF/Ceph checks -
+`cluster-reader` alone does not grant exec. The `Infrastructure` and `Console` singletons read
 for the report header's cluster name/API/console URLs are cluster-scoped
 `config.openshift.io` resources, readable under `cluster-reader` like the
 rest of the checks. In stock OpenShift only `cluster-admin` (and the
@@ -152,12 +165,17 @@ Useful flags:
   don't run it.
 - `-e cnv_enabled=false` - skip OpenShift Virtualization checks entirely on
   clusters that don't run it.
+- `-e odf_enabled=false` - skip OpenShift Data Foundation checks entirely on
+  clusters that don't run it.
+- `-e odf_exec_enabled=false` - keep the ODF CR/pod checks but skip the `ceph`
+  exec calls (e.g. no `rook-ceph-tools` pod available, or you'd rather not
+  exec at all).
 - `-e finalizer_scan_include_crs=false` - skip the dynamic per-CRD finalizer
   sweep on very large clusters and keep only the cheap Namespace/PV/PVC checks.
 - `--tags portworx,clusteroperators` - run a subset of checks (see the tag on
   each task in `playbook.yml`; the CNV section is tagged `virtualization,cnv`,
-  etcd is tagged `etcd`, stuck-finalizer scanning is tagged `finalizers`, and
-  ACM is tagged `acm`).
+  etcd is tagged `etcd`, stuck-finalizer scanning is tagged `finalizers`, ACM
+  is tagged `acm`, and ODF is tagged `odf,storage`).
 - `-e api_report_exclude_namespaces='["openshift-*","kube-*"]"` - hide
   platform namespaces from the deprecated-API matrix and focus on your own
   workloads.
@@ -281,7 +299,7 @@ capture of `pxctl status` / `pxctl license list` for a human to read. It does
 **not** parse or validate KVDB quorum detail, storage-pool
 rebalance/resync-in-progress state, or license expiry - Portworx's own CLI
 output is the source of truth for those and is included verbatim in the
-report (section 8) rather than re-implemented here. The report also prints a
+report (section 10) rather than re-implemented here. The report also prints a
 manual checklist covering:
 
 - Confirming your Portworx Enterprise/Operator version supports the OCP
@@ -296,9 +314,82 @@ If your Portworx install uses a different namespace or pod labels than the
 defaults (`portworx_namespace: portworx`, `portworx_pod_selector: name=portworx`),
 set those in `group_vars/all.yml`.
 
+## ODF notes
+
+OpenShift Data Foundation (ODF/OCS) support (report section 13) mirrors the
+Portworx module's shape exactly, per how this section was requested: first
+confirm the operator is actually installed (a StorageCluster CR present in
+`odf_namespace`, default `openshift-storage`), and only run the detail checks
+when it is.
+
+Three CRs/objects are involved, each reported differently because they don't
+all speak the same status "language":
+
+- **StorageCluster** (`ocs.openshift.io/v1`) follows the same
+  `Available`/`Progressing`/`Degraded`/`Upgradeable` condition convention
+  ClusterOperators use, so it reuses the existing `co_report()` filter -
+  exactly like CNV's HyperConverged/KubeVirt/CDI CRs do.
+- **CephCluster** (`ceph.rook.io/v1`) does **not** follow that convention - it
+  reports via a top-level `status.phase` (`Ready`/`Progressing`/`Failure`/...)
+  plus a nested `status.ceph.health` summary (`HEALTH_OK`/`HEALTH_WARN`/
+  `HEALTH_ERR`) that Rook keeps in sync with the storage cluster's actual
+  `ceph status`. A separate filter (`cephcluster_report()`) handles this shape,
+  but produces output in the same `name`/`severity`/`messages` form so the
+  task file and templates can treat every component report uniformly.
+- **`rook-ceph-osd` pods** - one pod per OSD, checked for `Running` the same
+  way Portworx's daemonset pods are.
+
+**Ceph cluster health, from the horse's mouth**: when `odf_exec_enabled: true`
+(the default) and a `Running` `rook-ceph-tools` pod is found, the playbook
+runs `ceph status -f json` and parses it into a structured report - overall
+health, every individual named health check Ceph itself is reporting (e.g.
+`OSD_DOWN`, `PG_DEGRADED`) with its own severity and message, OSD up/in
+counts from `osdmap`, a PG/capacity summary from `pgmap`, and mon quorum
+membership. That parse happens in Python (`ceph_status_report()` in
+`filter_plugins/ocp_health_filters.py`), never via Jinja's `from_json` filter
+in the task file - the same defensive-parsing lesson already applied to
+etcdctl's JSON output (Jinja2's native environment can hand a filter plugin an
+already-converted native dict, and a second JSON-decode pass on that blows
+up). A failed or missing exec capture degrades to an "unparsed" report rather
+than crashing the play; the raw captured text is always shown in the report
+regardless of whether the parse succeeded. Three more raw, unparsed captures
+are included alongside it for a human to read directly: `ceph osd status`,
+`ceph df`, and `ceph health detail`.
+
+The report also cross-checks Ceph's own `osdmap.num_osds` against the actual
+number of `rook-ceph-osd` pods found - a mismatch (e.g. an OSD pod that never
+scheduled, or a stale OSD entry Ceph hasn't forgotten) is flagged WARNING even
+when Ceph's overall health looks fine.
+
+What this does **not** try to infer from here: pool replication/erasure-coding
+profile correctness, MDS (CephFS)/RGW (object) subsystem health beyond what
+`ceph status` itself surfaces, in-flight backfill/recovery completion time, or
+ODF<->OCP version compatibility. These are called out as manual checklist
+items in the report instead, alongside the raw `ceph` output needed to check
+them:
+
+- Confirming your installed ODF/OCS Operator version supports the OCP version
+  you're upgrading to, via Red Hat's ODF-OCP interoperability matrix (and
+  upgrading ODF itself first, same ordering guidance as Portworx):
+  <https://access.redhat.com/articles/5001441>
+- Pool/cluster capacity headroom from the captured `ceph df` output - don't
+  start the upgrade with a pool at or near full.
+- Any OSD reported up-but-not-in, or reweighted to 0, in `ceph osd status` -
+  silent capacity/redundancy loss even when the pod itself is `Running`.
+- No scrub/backfill/recovery operation expected to still be running when node
+  drains begin.
+- MDS/RGW-specific health, if those subsystems are in use - checked
+  separately, outside this module's scope.
+
+If your ODF install uses a different namespace or CR/pod-selector names than
+the defaults (`odf_namespace: openshift-storage`,
+`odf_osd_pod_selector: app=rook-ceph-osd`,
+`odf_tools_pod_selector: app=rook-ceph-tools`), set those in
+`group_vars/all.yml`.
+
 ## OpenShift Virtualization notes
 
-The VM node-drain-readiness matrix (section 9 of the report) is built entirely
+The VM node-drain-readiness matrix (section 11 of the report) is built entirely
 from what KubeVirt itself already reports - the `LiveMigratable` status
 condition (the same one `oc get vmis -o wide` shows in the LIVE-MIGRATABLE
 column, and the same one the upstream `VMCannotBeEvicted` alert fires on),
@@ -422,6 +513,13 @@ starting point, not a guarantee.
   often on different versions/rollout timelines than the hub, so the
   update-path check isn't run identically everywhere by default. Set it if
   you actually want that check applied uniformly.
+- `upgrade_channel`, unlike `upgrade_target_version`, **is** auto-forwarded to
+  every cascaded child by default (see "child processes do NOT inherit your
+  outer command line" below) - a channel like `eus` is relative and each
+  child resolves it against its own `current_version`, so the same channel
+  string is correct even across spokes on different versions. Set
+  `acm_cascade_upgrade_channel` if cascaded clusters should use a *different*
+  channel than the hub itself.
 - Credential material (kubeconfig files, extra-vars files with tokens in
   them) is written to a scratch directory under `report_output_dir` for the
   duration of the cascade and deleted immediately after - if a run is killed
@@ -431,22 +529,36 @@ starting point, not a guarantee.
   Each cascaded cluster is a brand-new `ansible-playbook` process (see Layer 3
   above) with its own argv - `-e` flags, environment variables, and anything
   else you passed to the outer run are invisible to it unless this playbook
-  explicitly writes them into that child's extra-vars file. The one exception
-  is `ansible_python_interpreter`, which is forwarded automatically: whatever
-  value the outer run resolved (your own `-e ansible_python_interpreter=...`
-  override, or the inventory's `{{ ansible_playbook_python }}` default) is
-  captured and passed to every child, so if you're running with a pyenv/
-  virtualenv Python that has `kubernetes`/`openshift` pip-installed (and
-  `ansible-playbook` itself isn't launched from inside that venv, so Ansible
-  can't discover it on its own), you only need `-e
-  ansible_python_interpreter=/path/to/venv/bin/python` on the *outer* command
-  - it now reaches every cascaded cluster too. If you need to forward
-  anything else into the child runs (a different var, a proxy setting), set
-  `acm_cascade_extra_vars` in `group_vars/all.yml` (or `-e
-  acm_cascade_extra_vars='{"key":"value"}'`) - it's merged on top of
-  everything else per-cluster, so it can also override the auto-forwarded
-  interpreter if you ever need a *different* one for the child runs than for
-  the outer/hub one.
+  explicitly writes them into that child's extra-vars file. Two exceptions
+  are forwarded automatically:
+  - `ansible_python_interpreter` - whatever value the outer run resolved
+    (your own `-e ansible_python_interpreter=...` override, or the
+    inventory's `{{ ansible_playbook_python }}` default) is captured and
+    passed to every child, so if you're running with a pyenv/virtualenv
+    Python that has `kubernetes`/`openshift` pip-installed (and
+    `ansible-playbook` itself isn't launched from inside that venv, so
+    Ansible can't discover it on its own), you only need `-e
+    ansible_python_interpreter=/path/to/venv/bin/python` on the *outer*
+    command - it now reaches every cascaded cluster too.
+  - `upgrade_channel` - e.g. `-e upgrade_channel=eus` on the outer run is
+    forwarded to every cascaded child as-is, and each child resolves it
+    independently against its own `current_version` (see
+    [Upgrade channel resolution](#upgrade-channel-resolution-eus-aware)
+    above for why a relative channel forwards safely where a fixed
+    `upgrade_target_version` doesn't). **Fixed in this project on
+    2026-08-25** - earlier deliveries of the ACM cascade silently dropped
+    `upgrade_channel` for every cascaded cluster (only `ansible_python_interpreter`
+    was forwarded), so the upgrade-path section never appeared in any
+    per-cluster report even when the hub run set `upgrade_channel` explicitly.
+    If you're on an older delivery of this project, re-pull `tasks/85_acm.yml`
+    to pick up the fix.
+
+  If you need to forward anything else into the child runs (a different var,
+  a proxy setting), or want a *different* value than what's auto-forwarded
+  for either of the two above, set `acm_cascade_extra_vars` in
+  `group_vars/all.yml` (or `-e acm_cascade_extra_vars='{"key":"value"}'`) -
+  it's merged on top of everything else per-cluster, so it can override the
+  interpreter, or `acm_cascade_upgrade_channel` specifically for `upgrade_channel`.
 
 ## Deprecated-API-per-namespace caveats
 
@@ -493,6 +605,7 @@ tasks/70_portworx.yml
 tasks/80_openshift_virtualization.yml
 tasks/85_acm.yml                   ACM hub health, managed-cluster inventory, cascade
 tasks/85a_acm_wait_msa_secret.yml    included per-cluster from 85_acm.yml
+tasks/87_odf.yml                   OpenShift Data Foundation (ODF) + Ceph/OSD checks
 tasks/90_render_report.yml         renders templates, fails on CRITICAL
 filter_plugins/ocp_health_filters.py   all the report-building logic (unit tested)
 templates/report.md.j2 / report.html.j2 / report_summary.html.j2
