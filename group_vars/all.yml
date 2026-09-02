@@ -115,7 +115,7 @@ etcd_took_crit_ms: 300              # ...and CRITICAL
 # APIRequestCount doesn't natively carry a namespace field; namespaces are
 # recovered by parsing "system:serviceaccount:<namespace>:<name>" usernames.
 # Requests from human users / other principals are grouped under "(non-namespaced / human user)".
-api_report_exclude_namespaces: []   # e.g. ["openshift-*", "kube-*"] to hide platform namespaces
+api_report_exclude_namespaces: ["openshift-*", "kube-*"]   # e.g. ["openshift-*", "kube-*"] to hide platform namespaces
 api_report_min_requests: 1          # ignore usernames with fewer than N requests/24h
 
 # -----------------------------------------------------------------------------
