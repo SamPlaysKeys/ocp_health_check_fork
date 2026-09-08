@@ -1,0 +1,207 @@
+---
+# Checking Red Hat Operators Upgrade path.
+#
+# What this automates (read-only, via the Kubernetes/OpenShift API plus a
+# short-lived in-cluster Pod per OCP minor - see 88a_redhat_operators_render_minor.yml):
+#   - discover every OLM Subscription sourced from a Red Hat catalog (name,
+#     subscribed channel, exact installed CSV/version) - see
+#     olm_installed_operators()/redhat_catalogsource_names() in the filter plugin
+#   - render `opm render <index> -o json` ONCE per OCP minor on this cluster's
+#     upgrade path (current -> target, inclusive - ocp_minor_range()), not once
+#     per operator - rendering the whole catalog is the expensive part
+#   - for each installed operator, cross-reference its subscribed channel +
+#     exact version against EVERY hop's catalog snapshot to determine whether
+#     it needs to move at all during the OCP upgrade itself:
+#       * present everywhere            -> no action required during the OCP
+#                                           upgrade (still reports what it COULD
+#                                           be upgraded to afterward)
+#       * channel retired at a later hop -> a real channel-switch is required
+#                                           before crossing that hop (CRITICAL) -
+#                                           alternative channels available at the
+#                                           latest still-safe minor are listed
+#       * channel survives but this exact build gets pruned from it at a later
+#                                           hop -> an in-channel upgrade is
+#                                           required before crossing that hop
+#                                           (WARNING), no channel switch needed
+#   - flags operators whose own version mirrors the cluster's OCP major.minor
+#     (a common pattern for layered Red Hat products like OpenShift
+#     Virtualization) as likely requiring lock-step upgrades even when the
+#     catalog data alone says otherwise
+#   - the full per-operator breakdown (hops, action, channel-switch options,
+#     post-upgrade recommendation) is the "output matrix" in report section 14
+#
+# What this DOES NOT do:
+#   - it does not perform any upgrade itself (Subscription.spec.channel /
+#     spec.installPlanApproval are never written here) - read-only, same as
+#     every other check in this playbook
+#   - it cross-references the CATALOG's advertised graph, not runtime
+#     compatibility between an operator version and the workloads it manages -
+#     always confirm against that operator's own release notes too
+#
+# Needs upgrade_target_version resolved (explicit, or derived via
+# upgrade_channel - see tasks/11_upgrade_path.yml) to know which minors to
+# walk; skipped with a WARNING finding, not silently, when it isn't available.
+- name: Seed Red Hat Operators report variables so the templates render even when disabled/skipped
+  ansible.builtin.set_fact:
+    redhat_operators_installed: []
+    redhat_operators_ocp_minor_path: []
+    redhat_operators_catalog_by_minor: {}
+    redhat_operators_render_notes: []
+    redhat_operators_report: []
+
+- name: Red Hat Operators upgrade-path checks
+  when: redhat_operators_enabled | bool
+  block:
+    - name: Flag that this section needs a resolved target version and was skipped
+      ansible.builtin.set_fact:
+        findings: "{{ findings + [{
+            'section': 'Red Hat Operators upgrade path',
+            'severity': 'WARNING',
+            'summary': 'redhat_operators_enabled=true but no upgrade_target_version could be resolved (set it explicitly, or set upgrade_channel) - skipping the operator catalog cross-reference.',
+          }] }}"
+      when: upgrade_target_version | length == 0
+
+    - name: Detail checks (only when a target version is known)
+      when: upgrade_target_version | length > 0
+      block:
+        - name: Discover OLM Subscriptions (all namespaces)
+          kubernetes.core.k8s_info:
+            api_version: operators.coreos.com/v1alpha1
+            kind: Subscription
+          register: _rhop_subscriptions_raw
+          ignore_errors: true
+
+        - name: Discover ClusterServiceVersions (all namespaces)
+          kubernetes.core.k8s_info:
+            api_version: operators.coreos.com/v1alpha1
+            kind: ClusterServiceVersion
+          register: _rhop_csvs_raw
+          ignore_errors: true
+
+        - name: Discover CatalogSources (all namespaces)
+          kubernetes.core.k8s_info:
+            api_version: operators.coreos.com/v1alpha1
+            kind: CatalogSource
+          register: _rhop_catalogsources_raw
+          ignore_errors: true
+
+        - name: Identify which CatalogSources are Red Hat's own operator index
+          ansible.builtin.set_fact:
+            _rhop_catalog_source_names: "{{ (_rhop_catalogsources_raw.resources | default([])) | redhat_catalogsource_names(redhat_operators_catalogsource_image_pattern) }}"
+
+        - name: Flag when no Red Hat CatalogSource could be identified at all
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'Red Hat Operators upgrade path',
+                'severity': 'WARNING',
+                'summary': 'no CatalogSource matching redhat_operators_catalogsource_image_pattern was found - either this cluster genuinely has no Red Hat-catalog operators installed, or the default image-match pattern needs overriding for a mirrored/disconnected registry.',
+              }] }}"
+          when: _rhop_catalog_source_names | length == 0
+
+        - name: Join Subscriptions -> installed CSV, filtered to Red Hat-catalog operators
+          ansible.builtin.set_fact:
+            redhat_operators_installed: "{{ (_rhop_subscriptions_raw.resources | default([])) | olm_installed_operators(
+                _rhop_csvs_raw.resources | default([]), _rhop_catalog_source_names, redhat_operators_exclude_packages) }}"
+
+        - name: Append a finding for any Red Hat operator Subscription with no installed CSV yet (stuck/pending)
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'Red Hat Operators upgrade path',
+                'severity': 'WARNING',
+                'summary': item.package ~ ' (namespace ' ~ item.namespace ~ ') has no installed CSV yet - the Subscription may be stuck; this operator was skipped from the upgrade-path cross-reference.',
+              }] }}"
+          loop: "{{ redhat_operators_installed | selectattr('csv_name', 'none') | list }}"
+          loop_control:
+            label: "{{ item.package }}"
+
+        - name: Cross-reference checks (only when at least one Red Hat operator with a resolvable CSV is installed)
+          vars:
+            _rhop_with_csv: "{{ redhat_operators_installed | rejectattr('csv_name', 'none') | list }}"
+          when: _rhop_with_csv | length > 0
+          block:
+            - name: Compute the inclusive OCP minor path for this upgrade (current -> target)
+              ansible.builtin.set_fact:
+                _rhop_minor_range: "{{ current_version | ocp_minor_range(upgrade_target_version) }}"
+
+            - name: Append a finding if the minor range itself couldn't be computed
+              ansible.builtin.set_fact:
+                findings: "{{ findings + [{
+                    'section': 'Red Hat Operators upgrade path',
+                    'severity': 'WARNING',
+                    'summary': 'could not compute the OCP minor upgrade path: ' ~ _rhop_minor_range.error ~ ' - skipping the operator catalog cross-reference.',
+                  }] }}"
+              when: _rhop_minor_range.error is defined
+
+            - name: Render + cross-reference (only when the minor path resolved)
+              when: _rhop_minor_range.error is not defined
+              block:
+                - name: Record the resolved minor path
+                  ansible.builtin.set_fact:
+                    redhat_operators_ocp_minor_path: "{{ _rhop_minor_range.minors }}"
+                    redhat_operators_run_id: "{{ 999999 | random }}"
+
+                - name: "Render each OCP minor's Red Hat operator catalog once ({{ redhat_operators_ocp_minor_path | join(', ') }})"
+                  ansible.builtin.include_tasks: 88a_redhat_operators_render_minor.yml
+                  loop: "{{ redhat_operators_ocp_minor_path }}"
+                  loop_control:
+                    loop_var: redhat_operators_minor_item
+
+                - name: Append a WARNING finding for every minor whose catalog couldn't be rendered
+                  ansible.builtin.set_fact:
+                    findings: "{{ findings + [{
+                        'section': 'Red Hat Operators upgrade path',
+                        'severity': 'WARNING',
+                        'summary': item,
+                      }] }}"
+                  loop: "{{ redhat_operators_render_notes }}"
+                  loop_control:
+                    label: "{{ item }}"
+
+                - name: Build the per-operator upgrade-path cross-reference report
+                  ansible.builtin.set_fact:
+                    redhat_operators_report: "{{ _rhop_with_csv | redhat_operator_upgrade_report(
+                        redhat_operators_catalog_by_minor, redhat_operators_ocp_minor_path, current_version) }}"
+
+                - name: Append findings for operators requiring a channel switch before continuing the OCP upgrade
+                  ansible.builtin.set_fact:
+                    findings: "{{ findings + [{
+                        'section': 'Red Hat Operators upgrade path (' ~ item.package ~ ')',
+                        'severity': item.severity,
+                        'summary': item.package ~ ' [' ~ item.namespace ~ '] channel ' ~ item.subscribed_channel ~ ' @ ' ~ item.installed_version ~ ': ' ~ item.action_detail,
+                      }] }}"
+                  loop: "{{ redhat_operators_report | selectattr('action', 'equalto', 'channel_switch_required') | list }}"
+                  loop_control:
+                    label: "{{ item.package }}"
+
+                - name: Append findings for operators requiring an in-channel upgrade before continuing the OCP upgrade
+                  ansible.builtin.set_fact:
+                    findings: "{{ findings + [{
+                        'section': 'Red Hat Operators upgrade path (' ~ item.package ~ ')',
+                        'severity': item.severity,
+                        'summary': item.package ~ ' [' ~ item.namespace ~ '] channel ' ~ item.subscribed_channel ~ ' @ ' ~ item.installed_version ~ ': ' ~ item.action_detail,
+                      }] }}"
+                  loop: "{{ redhat_operators_report | selectattr('action', 'equalto', 'in_channel_upgrade_required') | list }}"
+                  loop_control:
+                    label: "{{ item.package }}"
+
+                - name: Append INFO findings for operators versioned in lock-step with OCP (heads-up even when otherwise OK)
+                  ansible.builtin.set_fact:
+                    findings: "{{ findings + [{
+                        'section': 'Red Hat Operators upgrade path (' ~ item.package ~ ')',
+                        'severity': 'INFO',
+                        'summary': item.package ~ ' [' ~ item.namespace ~ '] @ ' ~ item.installed_version ~ ' shares its major.minor with the cluster\\'s own OCP version - likely requires a lock-step upgrade alongside each OCP minor hop even though the catalog technically allows staying behind; confirm against this product\\'s own support matrix.',
+                      }] }}"
+                  loop: "{{ redhat_operators_report | selectattr('version_locked_to_ocp', 'equalto', true) | selectattr('action', 'equalto', 'none') | list }}"
+                  loop_control:
+                    label: "{{ item.package }}"
+
+                - name: Append a finding for any operator whose installed version couldn't be parsed at all
+                  ansible.builtin.set_fact:
+                    findings: "{{ findings + [{
+                        'section': 'Red Hat Operators upgrade path (' ~ item.package ~ ')',
+                        'severity': item.severity,
+                        'summary': item.package ~ ' [' ~ item.namespace ~ ']: ' ~ item.action_detail,
+                      }] }}"
+                  loop: "{{ redhat_operators_report | selectattr('action', 'equalto', 'unknown') | list }}"
+                  loop_control:
+                    label: "{{ item.package }}"

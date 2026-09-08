@@ -212,6 +212,10 @@ context = dict(
     ],
 )
 
+cluster_operators_snapshot_data = f.cluster_operators_snapshot(
+    fx.COSNAP_SUBSCRIPTIONS, fx.COSNAP_CSVS, fx.COSNAP_CATALOGSOURCES, "4.18.14", "4.20.32", "eus-4.20",
+)
+
 critical_findings = [x for x in findings if x["severity"] == "CRITICAL"]
 warning_findings = [x for x in findings if x["severity"] == "WARNING"]
 info_findings = [x for x in findings if x["severity"] == "INFO"]
@@ -220,6 +224,7 @@ context.update(
     warning_findings=warning_findings,
     info_findings=info_findings,
     overall_status="CRITICAL" if critical_findings else ("WARNING" if warning_findings else "OK"),
+    cluster_operators_snapshot_data=cluster_operators_snapshot_data,
 )
 
 env = jinja2.Environment(
@@ -234,6 +239,7 @@ for tpl_name, out_name in [
     ("report.md.j2", "preview.md"),
     ("report.html.j2", "preview.html"),
     ("report_summary.html.j2", "preview.summary.html"),
+    ("cluster_operators_installed.md.j2", "preview.cluster_operators_installed.md"),
 ]:
     try:
         rendered = env.get_template(tpl_name).render(**context)

@@ -97,6 +97,17 @@ into an existing ODF `rook-ceph-tools` pod.
     PG summary, mon quorum) plus raw `ceph osd status`/`ceph df`/`ceph health
     detail` captures for a human to read directly. See
     [ODF notes](#odf-notes) below for what is *not* automated.
+13. **Cluster operators installed snapshot** (flag:
+    `cluster_operators_snapshot_enabled`, default true) - a standalone data
+    dump, not part of the findings/severity report above: scans every OLM
+    Subscription/ClusterServiceVersion/CatalogSource and writes a
+    fixed-shape `outputs/cluster_operators_installed.json` (plus a
+    companion `.md`) listing every installed operator's package name,
+    subscribed channel, exact CSV version, and the image of whichever
+    CatalogSource it came from (Red Hat, certified, marketplace, or
+    community - no filtering). See
+    [Cluster operators snapshot notes](#cluster-operators-snapshot-notes)
+    below.
 
 Every non-OK result becomes a `finding` with a severity
 (`CRITICAL`/`WARNING`/`INFO`); the play fails at the end if any `CRITICAL`
@@ -387,6 +398,54 @@ the defaults (`odf_namespace: openshift-storage`,
 `odf_tools_pod_selector: app=rook-ceph-tools`), set those in
 `group_vars/all.yml`.
 
+## Cluster operators snapshot notes
+
+Unlike every other section, `outputs/cluster_operators_installed.json` (and
+its companion `.md`) is **not** a findings/severity report - it's a plain
+data dump for downstream tooling, in exactly this shape and no other keys:
+
+```json
+{
+  "cluster": { "current": "4.18.14", "target": "4.20.32", "channel": "EUS" },
+  "operators": [
+    { "name": "cluster-logging", "channel": "stable-6.2", "version": "6.2.0",
+      "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.20" }
+  ]
+}
+```
+
+- **name**/**channel** come straight from each `Subscription`'s
+  `spec.name`/`spec.channel`.
+- **version** comes from the matching `ClusterServiceVersion`'s own
+  `spec.version` field - a real, authoritative field on the CSV, not parsed
+  out of its name, so it correctly carries a build/prerelease suffix as-is
+  (e.g. `4.18.27-rhodf`, `4.18.0-202608142236`) exactly like the cluster
+  itself reports it.
+- **catalog** is the `spec.image` of the `CatalogSource` that Subscription's
+  `spec.source`/`spec.sourceNamespace` points to - reported for every
+  operator regardless of which catalog it came from (Red Hat, certified,
+  marketplace, community, or a custom one). There's no catalog filtering at
+  all here - unlike a more targeted per-catalog check might do, this section
+  is intentionally just "what's installed and where did it come from."
+- **cluster.channel** prefers the resolved `upgrade_channel` target (e.g.
+  `upgrade_channel: eus` resolves to `eus-4.20`) when `upgrade_channel` was
+  set, falling back to the cluster's own live `ClusterVersion` channel
+  otherwise. Any EUS-family channel is collapsed to the literal `"EUS"`
+  regardless of target minor; every other channel family (`stable-4.19`,
+  `fast-4.18`, ...) is kept as its full name.
+- A `Subscription` with no installed CSV yet (stuck, or still installing) is
+  **skipped** - there's no resolvable version for it, and this schema has no
+  null fields.
+- If the same package is subscribed more than once with an **identical**
+  channel and version (e.g. installed in two different namespaces), the
+  duplicate is **consolidated** into a single entry. If the channel or
+  version differs between them, both are kept - they're not really
+  duplicates at that point.
+
+Set `cluster_operators_snapshot_enabled: false` to skip this section
+entirely, or `cluster_operators_output_dir` to write somewhere other than
+the default `outputs/` folder alongside `reports/`.
+
 ## OpenShift Virtualization notes
 
 The VM node-drain-readiness matrix (section 11 of the report) is built entirely
@@ -606,6 +665,7 @@ tasks/80_openshift_virtualization.yml
 tasks/85_acm.yml                   ACM hub health, managed-cluster inventory, cascade
 tasks/85a_acm_wait_msa_secret.yml    included per-cluster from 85_acm.yml
 tasks/87_odf.yml                   OpenShift Data Foundation (ODF) + Ceph/OSD checks
+tasks/88_cluster_operators_installed.yml   writes outputs/cluster_operators_installed.json + .md
 tasks/90_render_report.yml         renders templates, fails on CRITICAL
 filter_plugins/ocp_health_filters.py   all the report-building logic (unit tested)
 templates/report.md.j2 / report.html.j2 / report_summary.html.j2
@@ -631,3 +691,11 @@ both histories linked) or push this repo's history to a remote of your own
 independent. Either way, treat this repo's own history (from initialization
 onward) as the record of how the playbook evolved - it's more precise than
 any changelog kept alongside it.
+
+## License
+
+Licensed under the Apache License, Version 2.0 - see [LICENSE](LICENSE) for
+the full text. Apache 2.0 was chosen (over, say, MIT) because it includes an
+explicit patent grant, matching the convention used across the
+Kubernetes/OpenShift ecosystem this playbook operates against (kubectl, OLM,
+the `kubernetes.core` and `redhat.openshift` Ansible collections, etc.).

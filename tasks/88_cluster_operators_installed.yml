@@ -1,0 +1,92 @@
+---
+# Cluster operators installed snapshot.
+#
+# Deliberately simple and standalone - NOT part of the findings/severity
+# report elsewhere in this playbook. Scans every OLM Subscription on the
+# cluster and writes a fixed-shape JSON snapshot to
+# outputs/cluster_operators_installed.json (plus a companion .md for a human
+# to skim), in exactly this shape and no other keys:
+#
+#   { "cluster": {"current": "4.18.14", "target": "4.20.32", "channel": "EUS"},
+#     "operators": [
+#       {"name": "cluster-logging", "channel": "stable-6.2", "version": "6.2.0",
+#        "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.20"},
+#       ...
+#     ] }
+#
+# - name/channel: straight from each Subscription (operators.coreos.com/v1alpha1)
+#   spec.name/spec.channel.
+# - version: the matching ClusterServiceVersion's own spec.version field (a
+#   real, authoritative field on the CSV - not parsed out of its name, so it
+#   correctly carries any build/prerelease suffix, e.g. "4.18.27-rhodf").
+# - catalog: the image of the CatalogSource that Subscription's spec.source
+#   points to - reported for EVERY operator regardless of which catalog it
+#   came from (Red Hat, certified, marketplace, community, a custom one),
+#   so a downstream consumer can tell them apart without this task filtering
+#   or guessing which catalog is "the real one".
+# - cluster.channel: upgrade_channel_resolution.channel (resolved from the
+#   upgrade_channel extra-var, e.g. "eus" -> "eus-4.20") when upgrade_channel
+#   was set and resolved cleanly, otherwise the cluster's own live
+#   ClusterVersion channel (current_channel). Collapsed to the literal "EUS"
+#   for any EUS-family channel regardless of target minor; every other
+#   channel family is kept as its full name (see _trim_channel_family() in
+#   the filter plugin).
+#
+# A Subscription with no installed CSV yet (stuck/still installing), or
+# whose CSV has no spec.version at all, is skipped - this output's schema
+# has no null fields. A package subscribed more than once with an identical
+# channel+version (e.g. the same operator installed in two namespaces) is
+# consolidated into a single entry; if the channel or version differs
+# between them they are kept as separate entries.
+- name: Cluster operators installed snapshot
+  when: cluster_operators_snapshot_enabled | bool
+  block:
+    - name: Discover OLM Subscriptions (all namespaces)
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+      register: _cosnap_subscriptions_raw
+      ignore_errors: true
+
+    - name: Discover ClusterServiceVersions (all namespaces)
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+      register: _cosnap_csvs_raw
+      ignore_errors: true
+
+    - name: Discover CatalogSources (all namespaces)
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: CatalogSource
+      register: _cosnap_catalogsources_raw
+      ignore_errors: true
+
+    - name: Resolve which channel value to report (upgrade_channel's resolved target, else the live cluster channel)
+      ansible.builtin.set_fact:
+        _cosnap_channel: "{{ upgrade_channel_resolution.channel if (upgrade_channel_resolution is defined and upgrade_channel_resolution.channel is defined) else current_channel }}"
+
+    - name: Build the cluster operators snapshot
+      ansible.builtin.set_fact:
+        cluster_operators_snapshot_data: "{{ (_cosnap_subscriptions_raw.resources | default([])) | cluster_operators_snapshot(
+            _cosnap_csvs_raw.resources | default([]),
+            _cosnap_catalogsources_raw.resources | default([]),
+            current_version, upgrade_target_version, _cosnap_channel) }}"
+
+    - name: Ensure the outputs directory exists
+      ansible.builtin.file:
+        path: "{{ cluster_operators_output_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write cluster_operators_installed.json
+      ansible.builtin.copy:
+        content: "{{ cluster_operators_snapshot_data | to_nice_json }}\n"
+        dest: "{{ cluster_operators_output_dir }}/cluster_operators_installed.json"
+        mode: "0644"
+
+    - name: Write cluster_operators_installed.md
+      ansible.builtin.template:
+        src: cluster_operators_installed.md.j2
+        dest: "{{ cluster_operators_output_dir }}/cluster_operators_installed.md"
+        mode: "0644"

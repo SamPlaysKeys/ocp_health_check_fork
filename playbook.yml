@@ -78,6 +78,10 @@
       ansible.builtin.include_tasks: tasks/87_odf.yml
       tags: [odf, storage]
 
+    - name: 88 - Cluster operators installed snapshot (outputs/cluster_operators_installed.json)
+      ansible.builtin.include_tasks: tasks/88_cluster_operators_installed.yml
+      tags: [cluster_operators, olm]
+
     - name: 90 - Render reports and evaluate overall readiness
       ansible.builtin.include_tasks: tasks/90_render_report.yml
       tags: [report, always]

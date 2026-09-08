@@ -360,6 +360,31 @@ check("an empty dict input degrades to parsed=False, not a crash", cs_empty["par
 cs_malformed = f.ceph_status_report("not json at all {{{")
 check("genuinely malformed JSON text degrades to parsed=False, not a crash", cs_malformed["parsed"] is False)
 
+# ---- cluster_operators_snapshot -----------------------------------------------
+check("_trim_channel_family collapses a bare 'eus' to 'EUS'", f._trim_channel_family("eus") == "EUS")
+check("_trim_channel_family collapses a qualified 'eus-4.20' to 'EUS' regardless of minor", f._trim_channel_family("eus-4.20") == "EUS")
+check("_trim_channel_family is case-insensitive", f._trim_channel_family("EUS-4.18") == "EUS")
+check("_trim_channel_family leaves a non-EUS channel exactly as given", f._trim_channel_family("stable-4.19") == "stable-4.19")
+check("_trim_channel_family leaves a blank channel as an empty string, not a crash", f._trim_channel_family("") == "")
+
+snap = f.cluster_operators_snapshot(fx.COSNAP_SUBSCRIPTIONS, fx.COSNAP_CSVS, fx.COSNAP_CATALOGSOURCES, "4.18.14", "4.20.32", "eus-4.20")
+check("cluster.current/target are carried through as given", snap["cluster"]["current"] == "4.18.14" and snap["cluster"]["target"] == "4.20.32")
+check("cluster.channel is trimmed to EUS", snap["cluster"]["channel"] == "EUS")
+by_name = {o["name"]: o for o in snap["operators"]}
+check("cluster-logging is present with its CSV's real spec.version", by_name["cluster-logging"] == {"name": "cluster-logging", "channel": "stable-6.2", "version": "6.2.0", "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.20"})
+check("community-thing's catalog resolves to the community CatalogSource image, not Red Hat's", by_name["community-thing"]["catalog"] == "registry.redhat.io/redhat/community-operator-index:v4.20")
+check("multicluster-engine subscribed twice (same name/channel/version) is consolidated into ONE entry", len([o for o in snap["operators"] if o["name"] == "multicluster-engine"]) == 1)
+check("a stuck Subscription with no installedCSV is skipped entirely", "stuck-op" not in by_name)
+check("a CSV that exists but has no spec.version is skipped entirely", "no-version-csv-op" not in by_name)
+check("exactly 3 operators survive (cluster-logging, multicluster-engine x1, community-thing)", len(snap["operators"]) == 3)
+check("every operator row has exactly the 4 documented keys, nothing extra", all(set(o.keys()) == {"name", "channel", "version", "catalog"} for o in snap["operators"]))
+
+snap_stable = f.cluster_operators_snapshot(fx.COSNAP_SUBSCRIPTIONS, fx.COSNAP_CSVS, fx.COSNAP_CATALOGSOURCES, "4.18.14", "4.19.5", "stable-4.19")
+check("a non-EUS cluster.channel is kept as its full name, not trimmed", snap_stable["cluster"]["channel"] == "stable-4.19")
+
+check("cluster_operators_snapshot on no subscriptions/csvs/catalogsources returns an empty operators list, doesn't crash",
+      f.cluster_operators_snapshot([], [], [], "4.18.14", "", "") == {"cluster": {"current": "4.18.14", "target": "", "channel": ""}, "operators": []})
+
 print()
 if failures:
     print(f"{len(failures)} check(s) FAILED:")

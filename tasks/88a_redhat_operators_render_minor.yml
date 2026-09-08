@@ -1,0 +1,89 @@
+---
+# Included once per OCP minor on the upgrade path (via `loop:` on
+# include_tasks in tasks/88_redhat_operators.yml), same reason as
+# 85a_acm_wait_msa_secret.yml: `until`/`retries` apply cleanly to ONE pod's
+# wait-for-completion, not the whole loop at once. Expects
+# `redhat_operators_minor_item` (a "major.minor" string, e.g. "4.19") as the
+# loop var, and `redhat_operators_run_id` already set (see 88_redhat_operators.yml).
+#
+# Renders `opm render <index-image-for-this-minor> -o json` as a short-lived,
+# in-cluster Pod (NOT on the Ansible control host - see redhat_operators_opm_image's
+# comment in group_vars/all.yml for why), captures its stdout, and always
+# deletes the Pod afterward regardless of success/failure/timeout.
+- name: "Render the Red Hat operator catalog for OCP {{ redhat_operators_minor_item }}"
+  block:
+    - name: "Compute the index image reference for {{ redhat_operators_minor_item }}"
+      ansible.builtin.set_fact:
+        _rhop_pod_name: "redhat-operators-render-{{ redhat_operators_run_id }}-{{ redhat_operators_minor_item | replace('.', '-') }}"
+        _rhop_index_image: "{{ redhat_operators_index_image_template | replace('{minor}', redhat_operators_minor_item) }}"
+
+    - name: "Create the opm render Pod for {{ redhat_operators_minor_item }}"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: "{{ _rhop_pod_name }}"
+            namespace: "{{ redhat_operators_render_namespace }}"
+            labels:
+              app: ocp-preupgrade-health-check
+              purpose: redhat-operators-catalog-render
+          spec:
+            restartPolicy: Never
+            imagePullSecrets: "{{ redhat_operators_image_pull_secrets }}"
+            containers:
+              - name: opm
+                image: "{{ redhat_operators_opm_image }}"
+                command: ["opm", "render", "{{ _rhop_index_image }}", "-o", "json"]
+      register: _rhop_pod_create
+      ignore_errors: true
+
+    - name: "Wait for the opm render Pod to finish ({{ redhat_operators_minor_item }})"
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ redhat_operators_render_namespace }}"
+        name: "{{ _rhop_pod_name }}"
+      register: _rhop_pod_status
+      retries: "{{ redhat_operators_render_wait_retries }}"
+      delay: "{{ redhat_operators_render_wait_delay }}"
+      until: >-
+        (_rhop_pod_status.resources | default([]) | length > 0) and
+        ((_rhop_pod_status.resources[0].status.phase | default('')) in ['Succeeded', 'Failed'])
+      ignore_errors: true
+      when: _rhop_pod_create is succeeded
+
+    - name: "Capture opm render output ({{ redhat_operators_minor_item }})"
+      kubernetes.core.k8s_log:
+        kind: Pod
+        namespace: "{{ redhat_operators_render_namespace }}"
+        name: "{{ _rhop_pod_name }}"
+        container: opm
+      register: _rhop_render_log
+      ignore_errors: true
+      when: _rhop_pod_create is succeeded
+
+    - name: "Record the render result for {{ redhat_operators_minor_item }}"
+      # Manually accumulated across include_tasks calls, same convention as
+      # _acm_msa_secret_results in 85a_acm_wait_msa_secret.yml - a plain dict
+      # keyed by minor, merged in as each minor finishes rendering, since
+      # `register` + `loop` on an include_tasks doesn't build a clean
+      # per-item structure here either.
+      ansible.builtin.set_fact:
+        redhat_operators_catalog_by_minor: "{{ (redhat_operators_catalog_by_minor | default({})) | combine({
+            redhat_operators_minor_item: (_rhop_render_log.log | default(None))
+          }) }}"
+        redhat_operators_render_notes: "{{ (redhat_operators_render_notes | default([])) + (
+            [] if (_rhop_render_log is defined and _rhop_render_log is succeeded and (_rhop_render_log.log | default('') | length > 0))
+            else ['could not render the Red Hat operator catalog for OCP ' ~ redhat_operators_minor_item ~ ' (' ~ _rhop_index_image ~ ') - pod create/wait/log-fetch failed or timed out after ' ~ (redhat_operators_render_wait_retries | int * redhat_operators_render_wait_delay | int) ~ 's; every installed operator will conservatively be treated as not present at this hop until this is investigated']
+          ) }}"
+  always:
+    - name: "Delete the opm render Pod for {{ redhat_operators_minor_item }} (always, regardless of outcome)"
+      kubernetes.core.k8s:
+        state: absent
+        kind: Pod
+        namespace: "{{ redhat_operators_render_namespace }}"
+        name: "{{ _rhop_pod_name }}"
+        wait: false
+      ignore_errors: true
+      when: _rhop_pod_create is succeeded

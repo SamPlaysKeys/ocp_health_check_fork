@@ -1,0 +1,123 @@
+{
+    "cluster": {
+        "channel": "EUS",
+        "current": "4.18.14",
+        "target": "4.20.32"
+    },
+    "operators": [
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-v1",
+            "name": "openshift-cert-manager-operator",
+            "version": "1.19.2"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-2.10",
+            "name": "multicluster-engine",
+            "version": "2.10.6"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "release-2.15",
+            "name": "advanced-cluster-management",
+            "version": "2.15.6"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable",
+            "name": "kubevirt-hyperconverged",
+            "version": "4.18.23"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "latest",
+            "name": "openshift-gitops-operator",
+            "version": "1.21.1"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable",
+            "name": "local-storage-operator",
+            "version": "4.18.0-202608142236"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-6.2",
+            "name": "cluster-logging",
+            "version": "6.2.0"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "release-v2.10",
+            "name": "mtv-operator",
+            "version": "2.10.7"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable",
+            "name": "kubernetes-nmstate-operator",
+            "version": "4.18.0-202608180359"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-4.18",
+            "name": "cephcsi-operator",
+            "version": "4.18.27-rhodf"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-4.18",
+            "name": "mcg-operator",
+            "version": "4.18.27-rhodf"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-4.18",
+            "name": "ocs-client-operator",
+            "version": "4.18.27-rhodf"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-4.18",
+            "name": "ocs-operator",
+            "version": "4.18.27-rhodf"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-4.18",
+            "name": "odf-csi-addons-operator",
+            "version": "4.18.27-rhodf"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-4.18",
+            "name": "odf-dependencies",
+            "version": "4.18.27-rhodf"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-4.18",
+            "name": "odf-operator",
+            "version": "4.18.27-rhodf"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-4.18",
+            "name": "odf-prometheus-operator",
+            "version": "4.18.27-rhodf"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-4.18",
+            "name": "recipe",
+            "version": "4.18.27-rhodf"
+        },
+        {
+            "catalog": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+            "channel": "stable-4.18",
+            "name": "rook-ceph-operator",
+            "version": "4.18.27-rhodf"
+        }
+    ]
+}

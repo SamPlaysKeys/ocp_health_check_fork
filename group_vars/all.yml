@@ -115,7 +115,7 @@ etcd_took_crit_ms: 300              # ...and CRITICAL
 # APIRequestCount doesn't natively carry a namespace field; namespaces are
 # recovered by parsing "system:serviceaccount:<namespace>:<name>" usernames.
 # Requests from human users / other principals are grouped under "(non-namespaced / human user)".
-api_report_exclude_namespaces: ["openshift-*", "kube-*"]   # e.g. ["openshift-*", "kube-*"] to hide platform namespaces
+api_report_exclude_namespaces: []   # e.g. ["openshift-*", "kube-*"] to hide platform namespaces
 api_report_min_requests: 1          # ignore usernames with fewer than N requests/24h
 
 # -----------------------------------------------------------------------------
@@ -252,7 +252,19 @@ odf_exec_enabled: true              # set false to skip `ceph` exec calls via ro
 odf_exec_timeout: 30
 
 # -----------------------------------------------------------------------------
-# 10. Report / behavior
+# 10. Cluster operators installed snapshot
+# -----------------------------------------------------------------------------
+# A simple, standalone data dump (NOT part of the findings/severity report
+# above) - scans every OLM Subscription/ClusterServiceVersion/CatalogSource
+# on the cluster and writes a fixed-shape snapshot for downstream tooling to
+# consume: outputs/cluster_operators_installed.json (exact schema - see
+# cluster_operators_snapshot() in the filter plugin) plus a companion
+# outputs/cluster_operators_installed.md for a human to skim.
+cluster_operators_snapshot_enabled: true
+cluster_operators_output_dir: "{{ playbook_dir }}/outputs"
+
+# -----------------------------------------------------------------------------
+# 11. Report / behavior
 # -----------------------------------------------------------------------------
 report_output_dir: "{{ playbook_dir }}/reports"
 report_basename: "ocp-preupgrade-health-{{ cluster_id_short | default('cluster') }}-{{ report_timestamp }}"

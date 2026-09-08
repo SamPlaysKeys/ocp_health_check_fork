@@ -553,3 +553,56 @@ CEPH_STATUS_JSON_ERR = {
 }
 
 CEPH_STATUS_EXEC_FAILED_PLACEHOLDER = "(ceph status exec failed or was skipped - review manually)"
+
+# ---- Cluster operators installed snapshot (outputs/cluster_operators_installed.json) ----
+# Covers: a normal Red Hat operator, a package subscribed twice in two
+# different namespaces with an identical channel+version (must consolidate
+# to one entry), a stuck Subscription with no installedCSV (must be
+# skipped), a community-catalog operator (to prove catalog image lookup
+# isn't Red-Hat-specific), and a CSV that exists but has no spec.version
+# (must also be skipped - not enough data to report a version).
+COSNAP_SUBSCRIPTIONS = [
+    {
+        "metadata": {"name": "cluster-logging", "namespace": "openshift-logging"},
+        "spec": {"name": "cluster-logging", "channel": "stable-6.2", "source": "redhat-operators", "sourceNamespace": "openshift-marketplace"},
+        "status": {"installedCSV": "cluster-logging.v6.2.0"},
+    },
+    {
+        "metadata": {"name": "multicluster-engine", "namespace": "multicluster-engine"},
+        "spec": {"name": "multicluster-engine", "channel": "stable-2.10", "source": "redhat-operators", "sourceNamespace": "openshift-marketplace"},
+        "status": {"installedCSV": "multicluster-engine.v2.10.6"},
+    },
+    {
+        "metadata": {"name": "multicluster-engine", "namespace": "open-cluster-management"},
+        "spec": {"name": "multicluster-engine", "channel": "stable-2.10", "source": "redhat-operators", "sourceNamespace": "openshift-marketplace"},
+        "status": {"installedCSV": "multicluster-engine.v2.10.6"},
+    },
+    {
+        "metadata": {"name": "stuck-op", "namespace": "ns1"},
+        "spec": {"name": "stuck-op", "channel": "stable", "source": "redhat-operators", "sourceNamespace": "openshift-marketplace"},
+        "status": {},
+    },
+    {
+        "metadata": {"name": "community-thing", "namespace": "ns2"},
+        "spec": {"name": "community-thing", "channel": "alpha", "source": "community-operators", "sourceNamespace": "openshift-marketplace"},
+        "status": {"installedCSV": "community-thing.v1.0.0"},
+    },
+    {
+        "metadata": {"name": "no-version-csv-op", "namespace": "ns3"},
+        "spec": {"name": "no-version-csv-op", "channel": "stable", "source": "redhat-operators", "sourceNamespace": "openshift-marketplace"},
+        "status": {"installedCSV": "no-version-csv-op.v0.0.0"},
+    },
+]
+
+COSNAP_CSVS = [
+    {"metadata": {"name": "cluster-logging.v6.2.0", "namespace": "openshift-logging"}, "spec": {"version": "6.2.0"}},
+    {"metadata": {"name": "multicluster-engine.v2.10.6", "namespace": "multicluster-engine"}, "spec": {"version": "2.10.6"}},
+    {"metadata": {"name": "multicluster-engine.v2.10.6", "namespace": "open-cluster-management"}, "spec": {"version": "2.10.6"}},
+    {"metadata": {"name": "community-thing.v1.0.0", "namespace": "ns2"}, "spec": {"version": "1.0.0"}},
+    {"metadata": {"name": "no-version-csv-op.v0.0.0", "namespace": "ns3"}, "spec": {}},
+]
+
+COSNAP_CATALOGSOURCES = [
+    {"metadata": {"name": "redhat-operators", "namespace": "openshift-marketplace"}, "spec": {"image": "registry.redhat.io/redhat/redhat-operator-index:v4.20"}},
+    {"metadata": {"name": "community-operators", "namespace": "openshift-marketplace"}, "spec": {"image": "registry.redhat.io/redhat/community-operator-index:v4.20"}},
+]

@@ -1407,7 +1407,125 @@ def ceph_status_report(raw_status: Any) -> Dict[str, Any]:
 
 
 # ----------------------------------------------------------------------------
-# 12. Markdown table cell escaping
+# 12. Cluster operators installed snapshot (outputs/cluster_operators_installed.json)
+# ----------------------------------------------------------------------------
+# A deliberately minimal, fixed-shape data dump - NOT part of the
+# findings/severity report elsewhere in this playbook. Downstream tooling
+# consumes this file directly, so its shape is exactly:
+#   {"cluster": {"current", "target", "channel"},
+#    "operators": [{"name", "channel", "version", "catalog"}, ...]}
+# and nothing else - no severity, no extra keys, no nulls.
+_EUS_CHANNEL_RE = re.compile(r"^eus(-\d+\.\d+)?$", re.IGNORECASE)
+
+
+def _trim_channel_family(channel: Any) -> str:
+    """Collapse an OCP upgrade channel to the bare family name "EUS" when
+    it's any EUS-family channel (bare "eus" or a qualified "eus-4.20"),
+    regardless of which minor it targets - EUS is reported as one concept.
+    Every other channel family (stable/fast/candidate/...) is returned
+    exactly as given, full name intact - only EUS was asked to collapse."""
+    text = str(channel or "")
+    return "EUS" if _EUS_CHANNEL_RE.match(text) else text
+
+
+def cluster_operators_snapshot(
+    subscriptions: List[dict],
+    csvs: List[dict],
+    catalogsources: List[dict],
+    current_version: Any,
+    target_version: Any,
+    channel: Any,
+) -> Dict[str, Any]:
+    """Build the exact fixed-shape structure written to
+    outputs/cluster_operators_installed.json.
+
+    Per operator: `name`/`channel` come straight from each Subscription's
+    `spec.name`/`spec.channel`; `version` comes from the matching
+    ClusterServiceVersion's own `spec.version` field - a real, authoritative
+    field on the CSV (NOT parsed out of its name), which is why it correctly
+    carries a build/prerelease suffix as-is (e.g. '4.18.27-rhodf',
+    '4.18.0-202608142236') exactly like the live cluster reports it;
+    `catalog` is the `spec.image` of the CatalogSource that Subscription's
+    `spec.source`/`spec.sourceNamespace` points to (falling back to the
+    Subscription's own namespace when `sourceNamespace` isn't set, since
+    that's a valid CatalogSource location too) - this lets a downstream
+    consumer tell Red Hat's own catalog apart from certified/marketplace/
+    community WITHOUT this task filtering or guessing which catalog is
+    "the real one".
+
+    A Subscription with no installed CSV yet (still installing, or stuck),
+    or whose CSV has no `spec.version` at all, is skipped - it has no
+    resolvable version and this output's schema has no null fields.
+    Duplicate installs of the same package (same name+channel+version,
+    e.g. the same operator subscribed in more than one namespace) are
+    consolidated into a single entry rather than repeated - if two
+    Subscriptions for the same package differ in channel or version
+    they are NOT considered duplicates and both are kept.
+
+    `channel` (the top-level cluster.channel value) is collapsed to "EUS"
+    for any EUS-family channel via `_trim_channel_family` - the caller
+    decides WHICH channel string to pass in (the resolved upgrade_channel
+    target, or the live cluster channel), this function only applies that
+    one presentation rule. Never raises."""
+    csv_version_by_namespaced_name: Dict[Any, str] = {}
+    for csv in csvs or []:
+        ns = _get(csv, "metadata.namespace", "")
+        name = _get(csv, "metadata.name", "")
+        version = _get(csv, "spec.version")
+        if name and version:
+            csv_version_by_namespaced_name[(ns, name)] = str(version)
+
+    catalog_image_by_source: Dict[Any, str] = {}
+    for cs in catalogsources or []:
+        ns = _get(cs, "metadata.namespace", "")
+        name = _get(cs, "metadata.name", "")
+        image = _get(cs, "spec.image", "")
+        if name:
+            catalog_image_by_source[(ns, name)] = image
+
+    operators: List[dict] = []
+    seen: Dict[tuple, bool] = {}
+    for sub in subscriptions or []:
+        ns = _get(sub, "metadata.namespace", "")
+        csv_name = _get(sub, "status.installedCSV") or _get(sub, "status.currentCSV")
+        if not csv_name:
+            continue
+        version = csv_version_by_namespaced_name.get((ns, csv_name))
+        if not version:
+            continue
+        op_name = _get(sub, "spec.name", "")
+        op_channel = _get(sub, "spec.channel", "")
+
+        dedup_key = (op_name, op_channel, version)
+        if dedup_key in seen:
+            continue
+        seen[dedup_key] = True
+
+        source_name = _get(sub, "spec.source", "")
+        source_ns = _get(sub, "spec.sourceNamespace") or ns
+        catalog_image = catalog_image_by_source.get((source_ns, source_name), "")
+
+        operators.append(
+            {
+                "name": op_name,
+                "channel": op_channel,
+                "version": version,
+                "catalog": catalog_image,
+            }
+        )
+
+    return {
+        "cluster": {
+            "current": str(current_version or ""),
+            "target": str(target_version or ""),
+            "channel": _trim_channel_family(channel),
+        },
+        "operators": operators,
+    }
+
+
+# ----------------------------------------------------------------------------
+# 13. Markdown table cell escaping
 # ----------------------------------------------------------------------------
 def md_cell(value: Any) -> str:
     """Escape a value for safe use inside a GFM/CommonMark pipe-table cell:
@@ -1436,5 +1554,6 @@ class FilterModule(object):
             "cincinnati_shortest_path": cincinnati_shortest_path,
             "cephcluster_report": cephcluster_report,
             "ceph_status_report": ceph_status_report,
+            "cluster_operators_snapshot": cluster_operators_snapshot,
             "md_cell": md_cell,
         }
