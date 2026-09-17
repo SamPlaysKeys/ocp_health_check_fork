@@ -1,0 +1,78 @@
+---
+# Per-catalog opm render (outputs/<catalog>_<tag>.json) - follow-on to the
+# cluster operators installed snapshot (task 88).
+#
+# For every CatalogSource actually referenced by an operator in
+# cluster_operators_snapshot_data.operators (i.e. the SAME operators
+# already written to cluster_operators_installed.json - not re-derived
+# from raw Subscriptions, so the two files never disagree on which
+# packages "count"), this:
+#   1. finds that CatalogSource's own running Pod (it already IS the
+#      catalog image - registry.redhat.io/... or a mirrored
+#      private.registry.local/... one on an airgapped cluster, whichever
+#      the live CatalogSource points to)
+#   2. reads the exact <source_path> that pod's `opm serve <source_path>`
+#      was started with (works for both a file-based-config directory
+#      like /configs and a legacy sqlite DB path)
+#   3. execs `opm render <source_path> -o json` INSIDE that pod - reading
+#      its own already-pulled filesystem, no second image pull, no grpc
+#      client needed even though the pod also happens to serve grpc on
+#      50051 for OLM's own use
+#   4. keeps only the olm.channel entries for packages this cluster has
+#      installed from that catalog (see opm_render_filter() docstring for
+#      why other schemas are dropped)
+#   5. writes outputs/<catalog-image-name>_<tag>.json - one file per
+#      unique catalog image, e.g. outputs/redhat-operator-index_v4.20.json
+#
+# Deliberately best-effort per catalog, same posture as ODF's ceph exec
+# (tasks/87_odf.yml): a catalog whose Pod can't be found, whose opm serve
+# args can't be parsed, or whose exec fails becomes a WARNING finding and
+# is skipped - it never fails the whole play.
+- name: Seed catalog opm render variables so downstream steps/templates are safe even when disabled/skipped
+  ansible.builtin.set_fact:
+    catalog_render_targets_data: []
+    catalog_render_results: []
+
+- name: Per-catalog opm render
+  when: cluster_operators_snapshot_enabled | bool and catalog_render_enabled | bool
+  block:
+    - name: Fail fast with a clear message if this ran without task 88 having populated the snapshot first
+      ansible.builtin.assert:
+        that:
+          - cluster_operators_snapshot_data is defined
+        fail_msg: >-
+          catalog_render_enabled=true but cluster_operators_snapshot_data is undefined - this task
+          depends on task 88 (tasks/88_cluster_operators_installed.yml) having already run in this
+          same play. If you're running a subset with --tags, include cluster_operators/olm as well.
+        quiet: true
+
+    - name: Group the snapshot's own operators by the catalog they came from
+      ansible.builtin.set_fact:
+        catalog_render_targets_data: "{{ cluster_operators_snapshot_data.operators | catalog_render_targets(_cosnap_catalogsources_raw.resources | default([])) }}"
+
+    - name: Flag catalog targets whose image didn't resolve back to a known CatalogSource (nothing to render)
+      ansible.builtin.set_fact:
+        findings: "{{ findings + [{
+            'section': 'Catalog opm render',
+            'severity': 'WARNING',
+            'summary': item.packages | join(', ') ~ \" reference catalog image '\" ~ item.image ~ \"' but no matching CatalogSource object was found - opm render skipped for these packages.\",
+          }] }}"
+      loop: "{{ catalog_render_targets_data | selectattr('catalog_name', 'equalto', '') | list }}"
+      loop_control:
+        label: "{{ item.image }}"
+
+    - name: Render each resolvable catalog (best-effort - one catalog's failure never blocks another)
+      when: catalog_render_targets_data | selectattr('catalog_name', 'ne', '') | list | length > 0
+      block:
+        - name: Ensure the outputs directory exists
+          ansible.builtin.file:
+            path: "{{ catalog_render_output_dir }}"
+            state: directory
+            mode: "0755"
+
+        - name: Render one catalog
+          ansible.builtin.include_tasks: 89a_catalog_opm_render_one.yml
+          loop: "{{ catalog_render_targets_data | selectattr('catalog_name', 'ne', '') | list }}"
+          loop_control:
+            loop_var: _cr_target
+            label: "{{ _cr_target.catalog_name }} ({{ _cr_target.image }})"

@@ -108,6 +108,17 @@ into an existing ODF `rook-ceph-tools` pod.
     community - no filtering). See
     [Cluster operators snapshot notes](#cluster-operators-snapshot-notes)
     below.
+14. **Per-catalog opm render** (flag: `catalog_render_enabled`, default true,
+    requires `cluster_operators_snapshot_enabled: true`) - a follow-on to
+    #13: for every CatalogSource an installed operator actually came from,
+    execs `opm render <source-path> -o json` inside that CatalogSource's own
+    already-running pod and writes the `olm.channel` entries for just this
+    cluster's installed packages to `outputs/<catalog-image-name>_<tag>.json`
+    - one file per unique catalog image, so a downstream consumer can walk
+    each package's `replaces`/`skipRange` graph itself. Best-effort per
+    catalog (a missing pod or failed exec becomes a WARNING finding, not a
+    failed play). See
+    [Catalog opm render notes](#catalog-opm-render-notes) below.
 
 Every non-OK result becomes a `finding` with a severity
 (`CRITICAL`/`WARNING`/`INFO`); the play fails at the end if any `CRITICAL`
@@ -126,7 +137,9 @@ connect with needs at least `cluster-reader` (read access to nodes,
 clusteroperators, machineconfigpools, machinesets/machines, apirequestcounts,
 and the Portworx/ODF CRs and pods if `portworx_enabled`/`odf_enabled: true`)
 **plus** `pods/exec` in the `openshift-etcd` namespace for the etcd checks,
-and in the `openshift-storage` namespace for the ODF/Ceph checks -
+in the `openshift-storage` namespace for the ODF/Ceph checks, and in every
+namespace that hosts a CatalogSource pod (`openshift-marketplace` by default)
+for the per-catalog `opm render` step (task 89) -
 `cluster-reader` alone does not grant exec. The `Infrastructure` and `Console` singletons read
 for the report header's cluster name/API/console URLs are cluster-scoped
 `config.openshift.io` resources, readable under `cluster-reader` like the
@@ -445,6 +458,66 @@ data dump for downstream tooling, in exactly this shape and no other keys:
 Set `cluster_operators_snapshot_enabled: false` to skip this section
 entirely, or `cluster_operators_output_dir` to write somewhere other than
 the default `outputs/` folder alongside `reports/`.
+
+## Catalog opm render notes
+
+A follow-on to the snapshot above (task 89,
+`tasks/89_catalog_opm_render.yml`): for every `CatalogSource` an installed
+operator actually came from, write that catalog's own `opm render` output -
+filtered to just this cluster's installed packages - to its own
+`outputs/<catalog-image-name>_<tag>.json`, e.g.
+`outputs/redhat-operator-index_v4.20.json`:
+
+```json
+[
+  { "package": "cluster-logging", "channel": "stable-6.2",
+    "entries": ["cluster-logging.v6.2.0", "cluster-logging.v6.1.0"] }
+]
+```
+
+**Why exec into the CatalogSource's own pod instead of pulling the index
+image again**: that pod already *is* the catalog image - it's running
+`opm serve <source-path>` from it right now, serving OLM's own grpc queries
+on port 50051. Re-pulling the image separately (or querying it over grpc,
+which speaks a different protobuf-based protocol, not the FBC JSON below)
+would be redundant and, on an airgapped cluster, might not even be possible
+from wherever this playbook runs. Instead this execs `opm render
+<source-path> -o json` **inside that pod**, reading its own local
+filesystem - works identically for a Red Hat catalog, a certified/
+marketplace one, or a mirrored `private.registry.local/...` catalog on an
+airgapped install, and for both a file-based-config image (`<source-path>`
+is a directory, typically `/configs`) and a legacy sqlite-DB image
+(`<source-path>` is a `.db` file) - the exact path is read off that pod's
+own `opm serve <source-path>` container args rather than assumed.
+
+**Filtering**: `opm render`'s `-o json` output is a *stream* of
+newline-delimited declarative-config objects (`olm.package`, `olm.channel`,
+`olm.bundle`, ...), not one JSON array - parsed defensively in Python
+(`opm_render_filter()` in `filter_plugins/ocp_health_filters.py`, same
+line-by-line/never-via-Jinja posture as `ceph_status_report()`). Only
+`olm.channel` objects are kept, and only for packages this cluster actually
+has installed **from that specific catalog** (the same package list already
+in `cluster_operators_installed.json` for that catalog - see #13 above,
+never re-derived from raw Subscriptions, so the two files can't drift
+apart). Every other schema, and every channel for a package this cluster
+doesn't have from that catalog, is dropped - keeping the output scoped to
+what a downstream consumer actually needs to walk `replaces`/`skipRange`
+for its own installed operators, rather than rendering (and shipping) the
+entire catalog.
+
+**Best-effort, per catalog** - a catalog whose Pod can't be found (wrong
+`olm.catalogSource` label, pod not `Running`), whose `opm serve` source path
+can't be parsed from its container args, or whose `opm render` exec fails
+(no `opm` binary in that particular catalog image, or `pods/exec` not
+granted in its namespace) becomes a single WARNING finding for that catalog
+and is skipped - it never fails the whole play, and every other resolvable
+catalog is still rendered.
+
+Requires `cluster_operators_snapshot_enabled: true` (task 88 must run first
+in the same play - task 89 asserts this explicitly rather than silently
+producing nothing). Set `catalog_render_enabled: false` to skip this section
+entirely, or `catalog_render_output_dir` to write somewhere other than
+`cluster_operators_output_dir` (which itself defaults to `outputs/`).
 
 ## OpenShift Virtualization notes
 

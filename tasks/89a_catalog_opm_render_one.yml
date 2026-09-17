@@ -1,0 +1,90 @@
+---
+# Included once per catalog (via `loop:` on include_tasks in
+# tasks/89_catalog_opm_render.yml) so one catalog's pod-not-found/exec
+# failure only skips that catalog, not the rest. Expects `_cr_target`
+# (one row from catalog_render_targets_data: catalog_name,
+# catalog_namespace, image, packages) as the loop var.
+- name: "Find a Running Pod for CatalogSource {{ _cr_target.catalog_name }}"
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ _cr_target.catalog_namespace }}"
+    label_selectors:
+      - "olm.catalogSource={{ _cr_target.catalog_name }}"
+  register: _cr_pods_raw
+  ignore_errors: true
+
+- name: "Pick a Running pod for {{ _cr_target.catalog_name }}"
+  ansible.builtin.set_fact:
+    _cr_pod: "{{ (_cr_pods_raw.resources | default([]) | selectattr('status.phase', 'equalto', 'Running') | list | first) | default({}) }}"
+
+- name: "Flag when no Running Pod was found for {{ _cr_target.catalog_name }}"
+  ansible.builtin.set_fact:
+    findings: "{{ findings + [{
+        'section': 'Catalog opm render',
+        'severity': 'WARNING',
+        'summary': \"no Running Pod found for CatalogSource \" ~ _cr_target.catalog_name ~ \" in \" ~ _cr_target.catalog_namespace ~ \" (label olm.catalogSource=\" ~ _cr_target.catalog_name ~ \") - opm render skipped for \" ~ (_cr_target.packages | join(', ')) ~ \".\",
+      }] }}"
+  when: (_cr_pod.metadata is not defined)
+
+- name: "opm render {{ _cr_target.catalog_name }} (only when a Running pod was found)"
+  when: _cr_pod.metadata is defined
+  block:
+    - name: "Resolve the opm serve source path for {{ _cr_target.catalog_name }}"
+      ansible.builtin.set_fact:
+        _cr_source_path: "{{ _cr_pod | opm_source_path }}"
+
+    - name: "Flag when the source path couldn't be parsed from {{ _cr_target.catalog_name }}'s pod spec"
+      ansible.builtin.set_fact:
+        findings: "{{ findings + [{
+            'section': 'Catalog opm render',
+            'severity': 'WARNING',
+            'summary': \"could not determine the opm serve source path from pod \" ~ _cr_pod.metadata.name ~ \" (CatalogSource \" ~ _cr_target.catalog_name ~ \") - opm render skipped for \" ~ (_cr_target.packages | join(', ')) ~ \". Review the pod's container command/args manually.\",
+          }] }}"
+      when: _cr_source_path | length == 0
+
+    - name: "opm render {{ _cr_target.catalog_name }} (only when a source path was resolved)"
+      when: _cr_source_path | length > 0
+      block:
+        - name: "opm render {{ _cr_source_path }} -o json (exec inside {{ _cr_pod.metadata.name }})"
+          kubernetes.core.k8s_exec:
+            namespace: "{{ _cr_target.catalog_namespace }}"
+            pod: "{{ _cr_pod.metadata.name }}"
+            container: "{{ _cr_pod.spec.containers[0].name }}"
+            command: "opm render {{ _cr_source_path }} -o json"
+          register: _cr_render_raw
+          ignore_errors: true
+
+        - name: "Flag when opm render exec failed for {{ _cr_target.catalog_name }}"
+          ansible.builtin.set_fact:
+            findings: "{{ findings + [{
+                'section': 'Catalog opm render',
+                'severity': 'WARNING',
+                'summary': \"opm render exec failed in pod \" ~ _cr_pod.metadata.name ~ \" (CatalogSource \" ~ _cr_target.catalog_name ~ \") - is opm present in this catalog image, and does '\" ~ _cr_target.catalog_name ~ \"' have cluster-admin-equivalent pods/exec granted? Skipped for \" ~ (_cr_target.packages | join(', ')) ~ \".\",
+              }] }}"
+          when: _cr_render_raw is failed or (_cr_render_raw.rc | default(1)) != 0
+
+        # Parsed in Python (never via Jinja from_json) - same defensive
+        # NDJSON-parsing lesson already applied to etcdctl/ceph JSON output
+        # (see opm_render_filter()'s docstring: opm's -o json is a stream
+        # of objects, not one JSON array or document).
+        - name: "Filter opm render output to this catalog's installed packages (only when exec succeeded)"
+          when: _cr_render_raw is defined and not (_cr_render_raw is failed) and (_cr_render_raw.rc | default(1)) == 0
+          block:
+            - name: "Parse and filter {{ _cr_target.catalog_name }}'s opm render output"
+              ansible.builtin.set_fact:
+                _cr_filtered: "{{ (_cr_render_raw.stdout | default('')) | opm_render_filter(_cr_target.packages) }}"
+
+            - name: "Write outputs/{{ _cr_target.image | catalog_render_filename }}.json"
+              ansible.builtin.copy:
+                content: "{{ _cr_filtered | to_nice_json }}\n"
+                dest: "{{ catalog_render_output_dir }}/{{ _cr_target.image | catalog_render_filename }}.json"
+                mode: "0644"
+
+            - name: "Record the render result for {{ _cr_target.catalog_name }}"
+              ansible.builtin.set_fact:
+                catalog_render_results: "{{ catalog_render_results + [{
+                    'catalog_name': _cr_target.catalog_name,
+                    'image': _cr_target.image,
+                    'file': (_cr_target.image | catalog_render_filename) ~ '.json',
+                    'channels_written': _cr_filtered | length,
+                  }] }}"

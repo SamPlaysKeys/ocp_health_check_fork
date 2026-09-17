@@ -264,6 +264,22 @@ cluster_operators_snapshot_enabled: true
 cluster_operators_output_dir: "{{ playbook_dir }}/outputs"
 
 # -----------------------------------------------------------------------------
+# 10a. Per-catalog opm render (outputs/<catalog>_<tag>.json)
+# -----------------------------------------------------------------------------
+# Follow-on to the snapshot above (task 89, tasks/89_catalog_opm_render.yml) -
+# for every CatalogSource actually referenced by an installed operator, execs
+# `opm render <source-path> -o json` inside that CatalogSource's own already-
+# running pod (no second image pull, works against an airgapped mirror the
+# same as registry.redhat.io) and writes the olm.channel entries for just
+# this cluster's installed packages to outputs/<catalog-image-name>_<tag>.json.
+# Requires cluster_operators_snapshot_enabled: true (this reuses that task's
+# operators list so the two output files never disagree on which packages
+# "count") and pods/exec permission against each CatalogSource's namespace -
+# see the README's requirements section.
+catalog_render_enabled: true
+catalog_render_output_dir: "{{ cluster_operators_output_dir }}"
+
+# -----------------------------------------------------------------------------
 # 11. Report / behavior
 # -----------------------------------------------------------------------------
 report_output_dir: "{{ playbook_dir }}/reports"

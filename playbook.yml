@@ -82,6 +82,10 @@
       ansible.builtin.include_tasks: tasks/88_cluster_operators_installed.yml
       tags: [cluster_operators, olm]
 
+    - name: 89 - Per-catalog opm render (outputs/<catalog>_<tag>.json)
+      ansible.builtin.include_tasks: tasks/89_catalog_opm_render.yml
+      tags: [cluster_operators, olm, opm_render]
+
     - name: 90 - Render reports and evaluate overall readiness
       ansible.builtin.include_tasks: tasks/90_render_report.yml
       tags: [report, always]
