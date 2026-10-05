@@ -1759,6 +1759,17 @@ def _mirror_source_covers(source: str, repo: str) -> bool:
     return repo == source or repo.startswith(source + "/")
 
 
+def _mirror_rewrite(image: str, source: str, mirror: str) -> str:
+    """The image ref CRI-O actually pulls when mirror-set `source` redirects
+    `image` to `mirror`: the matched prefix (or wildcard host) is replaced,
+    the rest of the path and the tag/digest kept."""
+    source = source.rstrip("/")
+    if source.startswith("*."):
+        host = image.split("/", 1)[0]
+        return mirror.rstrip("/") + image[len(host):]
+    return mirror.rstrip("/") + image[len(source):]
+
+
 def catalog_mirror_report(
     idms: List[dict],
     icsp: List[dict],
@@ -1769,6 +1780,7 @@ def catalog_mirror_report(
     default_sources: Optional[List[str]] = None,
     marketplace_namespace: str = "openshift-marketplace",
     itms: Optional[List[dict]] = None,
+    csvs: Optional[List[dict]] = None,
 ) -> Dict[str, Any]:
     """Cross-check mirror configuration against OLM catalog usage.
 
@@ -1798,6 +1810,16 @@ def catalog_mirror_report(
       'default' (a default OperatorHub source), 'missing' (CatalogSource no
       longer exists), 'other' (custom catalog pulled from its own registry)
       or 'unknown' (no InstallPlan/catalog found).
+    - catalogs: installed operators grouped by the catalog image their
+      Subscription resolves updates from (spec.source/sourceNamespace), so a
+      consumer can `opm render` each image once for all its operators. Per
+      image: the CatalogSource(s) using it, pull_image (the ref actually
+      pulled - the mirror location when an IDMS/ICSP/ITMS entry redirects
+      it, else the image itself), pulled_from, packages (sorted, unique),
+      and per operator: package, channel, csv, version (the CSV's
+      spec.version when `csvs` is given), namespace, subscription and the
+      InstallPlan catalog/image it was installed from. Subscriptions whose
+      catalog can't be resolved to an image go to unresolved_operators.
     - notes: plain-language explanations of what the mirror config means
       for this cluster, for the report.
     - findings (mirrored clusters only): CRITICAL when any default
@@ -1857,7 +1879,8 @@ def catalog_mirror_report(
             return {"ref_type": ref_type, "path": "mirror-host", "via": "", "policy": ""}
         for ms, e in (digest_entries if ref_type == "digest" else tag_entries):
             if e["mirrors"] and _mirror_source_covers(e["source"], repo):
-                return {"ref_type": ref_type, "path": ms["short"], "via": f"{ms['short']}/{ms['name']}", "policy": e["policy"]}
+                return {"ref_type": ref_type, "path": ms["short"], "via": f"{ms['short']}/{ms['name']}", "policy": e["policy"],
+                        "pull_image": _mirror_rewrite(image, e["source"], e["mirrors"][0])}
         return {"ref_type": ref_type, "path": "source", "via": "", "policy": ""}
 
     hub = next((h for h in operatorhub or [] if _get(h, "metadata.name") == "cluster"), {})
@@ -1908,7 +1931,11 @@ def catalog_mirror_report(
         unmirrored_bundle = "a bundle missing from the mirror only pulls through the fallback to the source registry, and fails once the cluster is disconnected"
 
     ip_by_key = {(_get(ip, "metadata.namespace", ""), _get(ip, "metadata.name", "")): ip for ip in installplans or []}
+    csv_version = {(_get(c, "metadata.namespace", ""), _get(c, "metadata.name", "")): str(_get(c, "spec.version", "") or "")
+                   for c in csvs or []}
 
+    catalogs_by_image: Dict[str, dict] = {}
+    unresolved_operators: List[dict] = []
     operators = []
     for sub in subscriptions or []:
         ns = _get(sub, "metadata.namespace", "")
@@ -1948,6 +1975,36 @@ def catalog_mirror_report(
                            else f"installed from catalog {ip_cat_name} whose image {ip_image} is not pulled from the mirror "
                                 f"(not on a mirror host, and no IDMS/ICSP/ITMS entry covers it)")
 
+        sub_cs = cs_by_key.get((sub_source_ns, sub_source))
+        sub_image = _get(sub_cs, "spec.image", "") if sub_cs else ""
+        op_entry = {
+            "package": _get(sub, "spec.name", ""),
+            "channel": _get(sub, "spec.channel", "") or "",
+            "csv": csv,
+            "version": csv_version.get((ns, csv), ""),
+            "namespace": ns,
+            "subscription": _get(sub, "metadata.name", ""),
+            "installplan_catalog": ip_cat_name,
+            "installplan_catalog_image": ip_image,
+        }
+        if not sub_image:
+            unresolved_operators.append(dict(op_entry, catalog_source=sub_source, catalog_source_namespace=sub_source_ns))
+        else:
+            path = path_by_key[(sub_source_ns, sub_source)]
+            cat = catalogs_by_image.setdefault(sub_image, {
+                "image": sub_image,
+                "pull_image": path.get("pull_image", sub_image),
+                "pulled_from": path["path"],
+                "catalog_sources": [],
+                "default": False,
+                "operators": [],
+            })
+            ref = {"name": sub_source, "namespace": sub_source_ns}
+            if ref not in cat["catalog_sources"]:
+                cat["catalog_sources"].append(ref)
+            cat["default"] = cat["default"] or path["default"]
+            cat["operators"].append(op_entry)
+
         operators.append({
             "package": _get(sub, "spec.name", ""),
             "namespace": ns,
@@ -1962,6 +2019,14 @@ def catalog_mirror_report(
             "message": message,
         })
     operators.sort(key=lambda o: (-_severity_rank(o["severity"]), o["namespace"], o["package"]))
+
+    catalogs = []
+    for image in sorted(catalogs_by_image):
+        cat = catalogs_by_image[image]
+        cat["operators"].sort(key=lambda o: (o["package"], o["namespace"]))
+        cat["packages"] = sorted({o["package"] for o in cat["operators"] if o["package"]})
+        catalogs.append(cat)
+    unresolved_operators.sort(key=lambda o: (o["package"], o["namespace"]))
 
     notes: List[str] = []
     if not mirror_configured:
@@ -2030,6 +2095,8 @@ def catalog_mirror_report(
         "disable_all_default_sources": disable_all,
         "default_sources": default_rows,
         "operators": operators,
+        "catalogs": catalogs,
+        "unresolved_operators": unresolved_operators,
         "notes": notes,
         "findings": findings,
     }

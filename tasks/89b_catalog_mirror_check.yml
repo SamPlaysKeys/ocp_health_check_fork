@@ -29,7 +29,11 @@
 # Self-contained (fetches its own Subscriptions/CatalogSources) so it runs
 # with --tags catalog_mirror alone. Every lookup is ignore_errors - a
 # missing CRD (e.g. no IDMS API on an older cluster) just reads as empty.
-# The full result is also written to outputs/catalog_mirror_check.json.
+# The full result is also written to outputs/catalog_mirror_check.json. Its
+# `catalogs` list groups the installed operators by the catalog image their
+# Subscription resolves updates from (with package, channel, csv, version)
+# so an external script can `opm render` each image once - pull_image is
+# the ref to pull (the mirror location when a mirror set redirects it).
 #
 # Always runs (no enable flag): skipping it would let a mirrored cluster
 # with default sources or old-catalog InstallPlans report as healthy.
@@ -78,6 +82,15 @@
       register: _cm_subscriptions_raw
       ignore_errors: true
 
+    - name: Discover ClusterServiceVersions (originals only - for each operator's installed version)
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        label_selectors:
+          - "!olm.copiedFrom"
+      register: _cm_csvs_raw
+      ignore_errors: true
+
     - name: Discover InstallPlans (all namespaces)
       kubernetes.core.k8s_info:
         api_version: operators.coreos.com/v1alpha1
@@ -94,7 +107,8 @@
             _cm_subscriptions_raw.resources | default([]),
             _cm_installplans_raw.resources | default([]),
             catalog_default_sources,
-            itms=_cm_itms_raw.resources | default([])) }}"
+            itms=_cm_itms_raw.resources | default([]),
+            csvs=_cm_csvs_raw.resources | default([])) }}"
 
     - name: Record catalog mirror findings
       ansible.builtin.set_fact:

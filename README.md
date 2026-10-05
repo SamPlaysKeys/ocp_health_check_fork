@@ -615,6 +615,40 @@ What the check reports:
   These cases are CRITICAL because they block the upgrade. OLM resolves
   those operators' updates from a catalog outside the mirror, so the bundles it
   picks may not be mirrored.
+- **`catalogs` in `outputs/catalog_mirror_check.json`**: installed operators
+  grouped by the catalog image their Subscription resolves updates from, so
+  another tool can run `opm render` once per image for all its operators:
+
+  ```json
+  "catalogs": [
+    {
+      "image": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+      "pull_image": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
+      "pulled_from": "source",
+      "default": true,
+      "catalog_sources": [{"name": "redhat-operators", "namespace": "openshift-marketplace"}],
+      "packages": ["devworkspace-operator", "openshift-cert-manager-operator"],
+      "operators": [
+        {"package": "devworkspace-operator", "channel": "fast", "csv": "devworkspace-operator.v0.43.0",
+         "version": "0.43.0", "namespace": "openshift-operators", "subscription": "devworkspace-operator",
+         "installplan_catalog": "redhat-operators",
+         "installplan_catalog_image": "registry.redhat.io/redhat/redhat-operator-index:v4.18"}
+      ]
+    }
+  ],
+  "unresolved_operators": []
+  ```
+
+  - `image` is the CatalogSource's `spec.image`.
+  - `pull_image` is the ref actually pulled: the mirror location when an
+    IDMS/ICSP/ITMS entry redirects the image, otherwise `image` itself.
+  - `pulled_from` is one of `mirror-host`, `IDMS`, `ICSP`, `ITMS` or `source`.
+  - `csv` is the bundle name in the catalog's `olm.channel` entries, and
+    `version` is that CSV's `spec.version`.
+  - `unresolved_operators` lists Subscriptions whose CatalogSource no longer
+    exists, so they have no image to render.
+
+  The rest of the file is the mirror check result shown in report section 14.
 - On a connected cluster (no IDMS, ICSP or ITMS), the tables are still built but
   nothing is flagged, because default catalogs are expected there.
 
