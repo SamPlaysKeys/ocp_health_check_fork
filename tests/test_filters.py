@@ -507,6 +507,69 @@ check("_split_image_ref tells digest from tag refs and keeps a registry port",
       and f._split_image_ref("mirror.local:5000/a/b") == ("mirror.local:5000/a/b", "tag"))
 check("connected cluster gets a 'Connected cluster' note", cm_no_mirror["notes"][0].startswith("Connected cluster"))
 
+_csvs = [{"metadata": {"name": "cluster-logging.v6.2.0", "namespace": "openshift-logging"}, "spec": {"version": "6.2.0"}},
+         {"metadata": {"name": "kubevirt-hyperconverged-operator.v4.18.3", "namespace": "openshift-cnv"}, "spec": {"version": "4.18.3"}}]
+_subs = [dict(x, spec=dict(x["spec"], channel="stable-6.2")) if x["metadata"]["name"] == "cluster-logging" else x for x in fx.MIRROR_SUBSCRIPTIONS]
+cg = f.catalog_mirror_report(fx.MIRROR_IDMS, [], [], fx.MIRROR_CATALOGSOURCES, _subs, fx.MIRROR_INSTALLPLANS, csvs=_csvs)
+cg_by_image = {c["image"]: c for c in cg["catalogs"]}
+_mirror_img = "mirror.local:5000/olm/redhat/redhat-operator-index:v4.20"
+_rh_img = "registry.redhat.io/redhat/redhat-operator-index:v4.20"
+_names = lambda img: [p["name"] for p in cg_by_image[img]["packages"]]
+check("catalogs has one entry per catalog image an operator was installed from",
+      set(cg_by_image) == {_mirror_img, _rh_img, "quay.io/acme/custom-index:latest"})
+check("packages items are {name, channel, version, main, required_by}, version from the installed CSV",
+      cg_by_image[_mirror_img]["packages"] == [{"name": "cluster-logging", "channel": "stable-6.2", "version": "6.2.0", "main": True, "required_by": []}])
+check("operator is grouped under its InstallPlan's catalog even when the Subscription was re-pointed to the mirror",
+      "kubevirt-hyperconverged" in _names(_rh_img) and "kubevirt-hyperconverged" not in _names(_mirror_img))
+check("InstallPlan catalog grouping: odf-operator under the default catalog it was installed from", "odf-operator" in _names(_rh_img))
+check("no InstallPlan -> falls back to the Subscription's catalog; missing CatalogSource -> unresolved_operators",
+      [p["name"] for p in cg["unresolved_operators"]] == ["certified-thing"] and cg["unresolved_operators"][0]["catalog_source"] == "certified-operators")
+_pending = f.catalog_mirror_report([], [], [], fx.MIRROR_CATALOGSOURCES, [{
+    "metadata": {"name": "web-terminal", "namespace": "openshift-operators"},
+    "spec": {"name": "web-terminal", "channel": "fast", "source": "cs-redhat-operator-index", "sourceNamespace": "openshift-marketplace"},
+    "status": {"currentCSV": "web-terminal.v1.13.1", "state": "UpgradePending"}}], [])
+check("Subscription with no installedCSV (Manual InstallPlan awaiting approval) is not_installed, not in any catalog's packages",
+      _pending["catalogs"] == [] and _pending["not_installed_operators"] == [
+          {"name": "web-terminal", "channel": "fast", "pending_csv": "web-terminal.v1.13.1", "main": True, "state": "UpgradePending", "namespace": "openshift-operators"}])
+check("catalog on a mirror host: pull_image is the image itself", cg_by_image[_mirror_img]["pull_image"] == _mirror_img and cg_by_image[_mirror_img]["pulled_from"] == "mirror-host")
+check("default catalog entry is marked default with its CatalogSource ref",
+      cg_by_image[_rh_img]["default"] and cg_by_image[_rh_img]["catalog_sources"] == [{"name": "redhat-operators", "namespace": "openshift-marketplace"}])
+_dup = f.catalog_mirror_report([], [], [], fx.MIRROR_CATALOGSOURCES,
+                               [fx.MIRROR_SUBSCRIPTIONS[0], dict(fx.MIRROR_SUBSCRIPTIONS[0], metadata={"name": "cluster-logging", "namespace": "other-ns"}, status={})], [])
+check("same package+channel+version subscribed in two namespaces is one packages entry",
+      len({c["image"]: c for c in _dup["catalogs"]}[_mirror_img]["packages"]) == 1)
+
+cg_itms = f.catalog_mirror_report([], [], [], fx.MIRROR_CATALOGSOURCES, fx.MIRROR_SUBSCRIPTIONS, fx.MIRROR_INSTALLPLANS, itms=fx.MIRROR_ITMS)
+_rh = {c["image"]: c for c in cg_itms["catalogs"]}["registry.redhat.io/redhat/redhat-operator-index:v4.20"]
+check("ITMS-redirected catalog: pull_image is rewritten to the mirror location, tag kept",
+      _rh["pull_image"] == "mirror.local:5000/olm/redhat/redhat-operator-index:v4.20" and _rh["pulled_from"] == "ITMS")
+check("_mirror_rewrite swaps a wildcard source's host only", f._mirror_rewrite("a.quay.io/acme/idx:v1", "*.quay.io", "mirror.local:5000/quay") == "mirror.local:5000/quay/acme/idx:v1")
+
+# ---- sub-operator detection + catalog_export (shapes taken from ocp5) ----
+so = f.catalog_mirror_report([], [], [], fx.SUBOP_CATALOGSOURCES, fx.SUBOP_SUBSCRIPTIONS, fx.SUBOP_INSTALLPLANS, csvs=fx.SUBOP_CSVS,
+                             suboperator_parents={"multicluster-engine": ["advanced-cluster-management"]})
+so_pkgs = {p["name"]: p for c in so["catalogs"] for p in c["packages"]}
+check("Subscription labelled olm.managed=true (created by OLM for a dependency) is main=false",
+      so_pkgs["devworkspace-operator"]["main"] is False)
+check("required_by comes from the InstallPlan bundle's olm.package.required (web-terminal -> devworkspace-operator)",
+      so_pkgs["devworkspace-operator"]["required_by"] == ["web-terminal"])
+check("operator a user subscribed to, requiring others, is main=true with empty required_by",
+      so_pkgs["web-terminal"]["main"] is True and so_pkgs["web-terminal"]["required_by"] == [])
+check("configured parent subscribed (ACM) marks multicluster-engine main=false, required_by its parent",
+      so_pkgs["multicluster-engine"]["main"] is False and so_pkgs["multicluster-engine"]["required_by"] == ["advanced-cluster-management"])
+_mce_alone = f.catalog_mirror_report([], [], [], fx.SUBOP_CATALOGSOURCES, [x for x in fx.SUBOP_SUBSCRIPTIONS if x["spec"]["name"] == "multicluster-engine"],
+                                     [], csvs=fx.SUBOP_CSVS, suboperator_parents={"multicluster-engine": ["advanced-cluster-management"]})
+check("multicluster-engine installed on its own (no ACM subscribed) stays main=true",
+      _mce_alone["catalogs"][0]["packages"][0]["main"] is True)
+check("catalog_export is exactly {operators: [{pull_image, packages}]}",
+      set(so["catalog_export"]) == {"operators"} and all(set(o) == {"pull_image", "packages"} for o in so["catalog_export"]["operators"]))
+check("catalog_export packages are {name, channel, version, main, required_by}",
+      all(set(p) == {"name", "channel", "version", "main", "required_by"} for o in so["catalog_export"]["operators"] for p in o["packages"]))
+check("catalog_export has one entry per pull_image with all its packages",
+      [(o["pull_image"], [p["name"] for p in o["packages"]]) for o in so["catalog_export"]["operators"]]
+      == [("registry.redhat.io/redhat/redhat-operator-index:v4.18",
+           ["advanced-cluster-management", "devworkspace-operator", "multicluster-engine", "web-terminal"])])
+
 print()
 if failures:
     print(f"{len(failures)} check(s) FAILED:")

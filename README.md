@@ -615,6 +615,48 @@ What the check reports:
   These cases are CRITICAL because they block the upgrade. OLM resolves
   those operators' updates from a catalog outside the mirror, so the bundles it
   picks may not be mirrored.
+- **`outputs/catalog_mirror_check.json`** contains only what an external
+  `opm` script needs to look up upgrade metadata: the installed operators,
+  grouped by the catalog image to pull. The script can run `opm render`
+  once per image:
+
+  ```json
+  {
+    "operators": [
+      {
+        "pull_image": "mirror.local:5000/olm/redhat/redhat-operator-index:v4.18",
+        "packages": [
+          {"name": "devworkspace-operator", "channel": "fast", "version": "0.43.0",
+           "main": false, "required_by": ["web-terminal"]},
+          {"name": "web-terminal", "channel": "fast", "version": "1.13.1",
+           "main": true, "required_by": []}
+        ]
+      }
+    ]
+  }
+  ```
+
+  - `pull_image` is the catalog ref actually pulled. When an IDMS, ICSP or
+    ITMS entry redirects the CatalogSource image, it is the mirror location;
+    otherwise it is the image itself.
+  - An operator belongs to the catalog that its InstallPlan installed the
+    current CSV from. When no InstallPlan is found, it falls back to the
+    Subscription's source.
+  - `name` is the package name, `channel` is the Subscription's channel, and
+    `version` is the installed CSV's `spec.version`. These match `opm`'s
+    `package`, channel `name` and bundle `version`. The same package,
+    channel and version installed in several namespaces is listed once.
+  - `main: false` marks a sub-operator that another operator pulled in.
+    Either OLM created its Subscription to satisfy a dependency (label
+    `olm.managed: "true"`), or a parent listed for it in
+    `catalog_suboperator_parents` is subscribed. That map covers operators
+    whose own controller creates the Subscription, such as ACM creating
+    `multicluster-engine`; add others as needed.
+  - `required_by` lists the packages that declare `olm.package.required` on
+    this one, from the InstallPlans, plus the configured parents.
+  - Subscriptions with nothing installed yet, or whose CatalogSource no
+    longer exists, are left out because they have no version or no image.
+    The mirror findings are in the report (section 14).
 - On a connected cluster (no IDMS, ICSP or ITMS), the tables are still built but
   nothing is flagged, because default catalogs are expected there.
 
