@@ -615,46 +615,48 @@ What the check reports:
   These cases are CRITICAL because they block the upgrade. OLM resolves
   those operators' updates from a catalog outside the mirror, so the bundles it
   picks may not be mirrored.
-- **`catalogs` in `outputs/catalog_mirror_check.json`**: installed operators
-  grouped by catalog image, so another tool can run `opm render` once per
-  image for all its operators:
+- **`outputs/catalog_mirror_check.json`** contains only what an external
+  `opm` script needs to look up upgrade metadata: the installed operators,
+  grouped by the catalog image to pull. The script can run `opm render`
+  once per image:
 
   ```json
-  "catalogs": [
-    {
-      "image": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
-      "pull_image": "registry.redhat.io/redhat/redhat-operator-index:v4.18",
-      "pulled_from": "source",
-      "default": true,
-      "catalog_sources": [{"name": "redhat-operators", "namespace": "openshift-marketplace"}],
-      "packages": [
-        {"name": "devworkspace-operator", "channel": "fast", "version": "0.43.0"},
-        {"name": "openshift-cert-manager-operator", "channel": "stable-v1", "version": "1.19.2"}
-      ]
-    }
-  ],
-  "unresolved_operators": []
+  {
+    "operators": [
+      {
+        "pull_image": "mirror.local:5000/olm/redhat/redhat-operator-index:v4.18",
+        "packages": [
+          {"name": "devworkspace-operator", "channel": "fast", "version": "0.43.0",
+           "main": false, "required_by": ["web-terminal"]},
+          {"name": "web-terminal", "channel": "fast", "version": "1.13.1",
+           "main": true, "required_by": []}
+        ]
+      }
+    ]
+  }
   ```
 
-  - `image` is the CatalogSource's `spec.image`.
-  - `pull_image` is the ref actually pulled: the mirror location when an
-    IDMS/ICSP/ITMS entry redirects the image, otherwise `image` itself.
-  - `pulled_from` is one of `mirror-host`, `IDMS`, `ICSP`, `ITMS` or `source`.
+  - `pull_image` is the catalog ref actually pulled. When an IDMS, ICSP or
+    ITMS entry redirects the CatalogSource image, it is the mirror location;
+    otherwise it is the image itself.
   - An operator belongs to the catalog that its InstallPlan installed the
     current CSV from. When no InstallPlan is found, it falls back to the
     Subscription's source.
-  - `packages` has one entry per operator: `name` is the package name,
-    `channel` is the Subscription's channel, and `version` is the installed
-    CSV's `spec.version`. These match `opm`'s `package`, channel `name` and
-    bundle `version`. The same package, channel and version installed in
-    several namespaces is listed once.
-  - `unresolved_operators` lists Subscriptions whose CatalogSource no longer
-    exists, so they have no image to render.
-  - `not_installed_operators` lists Subscriptions with nothing installed
-    yet, for example a Manual InstallPlan awaiting approval. Each entry has
-    `pending_csv` and the Subscription `state`.
-
-  The rest of the file is the mirror check result shown in report section 14.
+  - `name` is the package name, `channel` is the Subscription's channel, and
+    `version` is the installed CSV's `spec.version`. These match `opm`'s
+    `package`, channel `name` and bundle `version`. The same package,
+    channel and version installed in several namespaces is listed once.
+  - `main: false` marks a sub-operator that another operator pulled in.
+    Either OLM created its Subscription to satisfy a dependency (label
+    `olm.managed: "true"`), or a parent listed for it in
+    `catalog_suboperator_parents` is subscribed. That map covers operators
+    whose own controller creates the Subscription, such as ACM creating
+    `multicluster-engine`; add others as needed.
+  - `required_by` lists the packages that declare `olm.package.required` on
+    this one, from the InstallPlans, plus the configured parents.
+  - Subscriptions with nothing installed yet, or whose CatalogSource no
+    longer exists, are left out because they have no version or no image.
+    The mirror findings are in the report (section 14).
 - On a connected cluster (no IDMS, ICSP or ITMS), the tables are still built but
   nothing is flagged, because default catalogs are expected there.
 

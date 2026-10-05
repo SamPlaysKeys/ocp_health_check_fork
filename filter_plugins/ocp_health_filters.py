@@ -1781,6 +1781,7 @@ def catalog_mirror_report(
     marketplace_namespace: str = "openshift-marketplace",
     itms: Optional[List[dict]] = None,
     csvs: Optional[List[dict]] = None,
+    suboperator_parents: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, Any]:
     """Cross-check mirror configuration against OLM catalog usage.
 
@@ -1823,6 +1824,18 @@ def catalog_mirror_report(
       resolved to an image go to unresolved_operators; Subscriptions with
       nothing installed yet (no status.installedCSV - e.g. a Manual
       InstallPlan awaiting approval) go to not_installed_operators.
+      Each package also has `main` and `required_by`, to tell operators
+      someone installed from sub-operators another operator pulled in:
+      main is false when the Subscription carries olm.managed=true (OLM
+      created it to satisfy a dependency) or when a parent listed for that
+      package in `suboperator_parents` is subscribed (operators that create
+      another operator's Subscription themselves, e.g. ACM ->
+      multicluster-engine). required_by lists the packages whose bundles
+      declare olm.package.required on it (from InstallPlan bundleLookups)
+      plus those subscribed parents.
+    - catalog_export: the same data reduced to what an opm consumer needs:
+      {"operators": [{"pull_image", "packages": [{name, channel, version,
+      main, required_by}]}]}, merged by pull_image.
     - notes: plain-language explanations of what the mirror config means
       for this cluster, for the report.
     - findings (mirrored clusters only): CRITICAL when any default
@@ -1937,6 +1950,24 @@ def catalog_mirror_report(
     csv_version = {(_get(c, "metadata.namespace", ""), _get(c, "metadata.name", "")): str(_get(c, "spec.version", "") or "")
                    for c in csvs or []}
 
+    # package -> packages whose bundle declares olm.package.required on it
+    required_by_map: Dict[str, set] = {}
+    for ip in installplans or []:
+        for b in _get(ip, "status.bundleLookups", []) or []:
+            try:
+                props = json.loads(b.get("properties") or "{}").get("properties", []) or []
+            except (ValueError, TypeError, AttributeError):
+                continue
+            owner = next((p.get("value", {}).get("packageName") for p in props
+                          if isinstance(p, dict) and p.get("type") == "olm.package"), None)
+            for p in props:
+                if isinstance(p, dict) and p.get("type") == "olm.package.required":
+                    req = (p.get("value") or {}).get("packageName")
+                    if owner and req and req != owner:
+                        required_by_map.setdefault(req, set()).add(owner)
+    subscribed_packages = {_get(s, "spec.name", "") for s in subscriptions or []}
+    parents_cfg = suboperator_parents or {}
+
     catalogs_by_image: Dict[str, dict] = {}
     unresolved_operators: List[dict] = []
     not_installed_operators: List[dict] = []
@@ -1989,10 +2020,15 @@ def catalog_mirror_report(
             cat_name, cat_ns = sub_source, sub_source_ns
         cat_cs = cs_by_key.get((cat_ns, cat_name))
         cat_image = _get(cat_cs, "spec.image", "") if cat_cs else ""
+        pkg_name = _get(sub, "spec.name", "")
+        olm_managed = str((_get(sub, "metadata.labels", {}) or {}).get("olm.managed", "")).lower() == "true"
+        cfg_parents = [p for p in parents_cfg.get(pkg_name, []) or [] if p in subscribed_packages and p != pkg_name]
         pkg_entry = {
-            "name": _get(sub, "spec.name", ""),
+            "name": pkg_name,
             "channel": _get(sub, "spec.channel", "") or "",
             "version": csv_version.get((ns, csv), ""),
+            "main": not (olm_managed or cfg_parents),
+            "required_by": sorted(required_by_map.get(pkg_name, set()) | set(cfg_parents)),
         }
         if not _get(sub, "status.installedCSV"):
             # Nothing installed yet (e.g. a Manual InstallPlan awaiting
@@ -2000,6 +2036,7 @@ def catalog_mirror_report(
             not_installed_operators.append({
                 "name": pkg_entry["name"], "channel": pkg_entry["channel"],
                 "pending_csv": _get(sub, "status.currentCSV", "") or "",
+                "main": pkg_entry["main"],
                 "state": _get(sub, "status.state", "") or "",
                 "namespace": ns,
             })
@@ -2021,8 +2058,13 @@ def catalog_mirror_report(
             cat["default"] = cat["default"] or path["default"]
             # Same package+channel+version installed in several namespaces
             # is one entry - the catalog lookup is identical.
-            if pkg_entry not in cat["packages"]:
+            same = next((p for p in cat["packages"] if (p["name"], p["channel"], p["version"])
+                         == (pkg_entry["name"], pkg_entry["channel"], pkg_entry["version"])), None)
+            if same is None:
                 cat["packages"].append(pkg_entry)
+            else:
+                same["main"] = same["main"] or pkg_entry["main"]
+                same["required_by"] = sorted(set(same["required_by"]) | set(pkg_entry["required_by"]))
 
         operators.append({
             "package": _get(sub, "spec.name", ""),
@@ -2046,6 +2088,16 @@ def catalog_mirror_report(
         catalogs.append(cat)
     unresolved_operators.sort(key=lambda o: (o["name"], o["channel"]))
     not_installed_operators.sort(key=lambda o: (o["name"], o["namespace"]))
+
+    export_by_pull: Dict[str, List[dict]] = {}
+    for cat in catalogs:
+        bucket = export_by_pull.setdefault(cat["pull_image"], [])
+        for p in cat["packages"]:
+            if p not in bucket:
+                bucket.append(p)
+    catalog_export = {"operators": [
+        {"pull_image": img, "packages": sorted(pkgs, key=lambda p: (p["name"], p["channel"], p["version"]))}
+        for img, pkgs in sorted(export_by_pull.items())]}
 
     notes: List[str] = []
     if not mirror_configured:
@@ -2117,6 +2169,7 @@ def catalog_mirror_report(
         "catalogs": catalogs,
         "unresolved_operators": unresolved_operators,
         "not_installed_operators": not_installed_operators,
+        "catalog_export": catalog_export,
         "notes": notes,
         "findings": findings,
     }

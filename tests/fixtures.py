@@ -3,6 +3,8 @@ templates without needing a live cluster. Shapes mirror real `oc get -o json`
 output closely enough to validate the filter logic and Jinja rendering.
 """
 
+import json
+
 CLUSTERVERSION = {
     "spec": {"clusterID": "11111111-2222-3333-4444-555555555555", "channel": "stable-4.16"},
     "status": {
@@ -680,5 +682,46 @@ MIRROR_IDMS_NEVER_CONTACT = [
 MIRROR_ITMS = [
     {"metadata": {"name": "itms-operator-0"}, "spec": {"imageTagMirrors": [
         {"source": "registry.redhat.io/redhat", "mirrors": ["mirror.local:5000/olm/redhat"], "mirrorSourcePolicy": "NeverContactSource"},
+    ]}},
+]
+
+# ---- Sub-operator detection (shapes taken from a real 4.18 cluster) ----
+# devworkspace-operator's Subscription was created by OLM to satisfy
+# web-terminal's olm.package.required (label olm.managed=true, generated
+# name); multicluster-engine is created by ACM's own controller, so only
+# the configured parent map identifies it.
+SUBOP_CATALOGSOURCES = [
+    {"metadata": {"name": "redhat-operators", "namespace": "openshift-marketplace"}, "spec": {"image": "registry.redhat.io/redhat/redhat-operator-index:v4.18"}},
+]
+_RH = {"source": "redhat-operators", "sourceNamespace": "openshift-marketplace"}
+SUBOP_SUBSCRIPTIONS = [
+    {"metadata": {"name": "web-terminal", "namespace": "openshift-operators"},
+     "spec": dict(_RH, name="web-terminal", channel="fast"),
+     "status": {"installedCSV": "web-terminal.v1.13.1", "installPlanRef": {"name": "install-scxz8", "namespace": "openshift-operators"}}},
+    {"metadata": {"name": "devworkspace-operator-fast-redhat-operators-openshift-marketplace", "namespace": "openshift-operators",
+                  "labels": {"olm.managed": "true"}},
+     "spec": dict(_RH, name="devworkspace-operator", channel="fast"),
+     "status": {"installedCSV": "devworkspace-operator.v0.43.0", "installPlanRef": {"name": "install-scxz8", "namespace": "openshift-operators"}}},
+    {"metadata": {"name": "acm-operator-subscription", "namespace": "open-cluster-management"},
+     "spec": dict(_RH, name="advanced-cluster-management", channel="release-2.13"),
+     "status": {"installedCSV": "advanced-cluster-management.v2.13.3"}},
+    {"metadata": {"name": "multicluster-engine", "namespace": "multicluster-engine"},
+     "spec": dict(_RH, name="multicluster-engine", channel="stable-2.8"),
+     "status": {"installedCSV": "multicluster-engine.v2.8.3"}},
+]
+SUBOP_CSVS = [
+    {"metadata": {"name": "web-terminal.v1.13.1", "namespace": "openshift-operators"}, "spec": {"version": "1.13.1"}},
+    {"metadata": {"name": "devworkspace-operator.v0.43.0", "namespace": "openshift-operators"}, "spec": {"version": "0.43.0"}},
+    {"metadata": {"name": "advanced-cluster-management.v2.13.3", "namespace": "open-cluster-management"}, "spec": {"version": "2.13.3"}},
+    {"metadata": {"name": "multicluster-engine.v2.8.3", "namespace": "multicluster-engine"}, "spec": {"version": "2.8.3"}},
+]
+_RH_REF = {"name": "redhat-operators", "namespace": "openshift-marketplace"}
+SUBOP_INSTALLPLANS = [
+    {"metadata": {"name": "install-scxz8", "namespace": "openshift-operators"}, "status": {"bundleLookups": [
+        {"identifier": "web-terminal.v1.13.1", "catalogSourceRef": _RH_REF, "properties": json.dumps({"properties": [
+            {"type": "olm.package", "value": {"packageName": "web-terminal", "version": "1.13.1"}},
+            {"type": "olm.package.required", "value": {"packageName": "devworkspace-operator", "versionRange": ">=0.6.0"}}]})},
+        {"identifier": "devworkspace-operator.v0.43.0", "catalogSourceRef": _RH_REF, "properties": json.dumps({"properties": [
+            {"type": "olm.package", "value": {"packageName": "devworkspace-operator", "version": "0.43.0"}}]})},
     ]}},
 ]

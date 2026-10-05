@@ -29,11 +29,13 @@
 # Self-contained (fetches its own Subscriptions/CatalogSources) so it runs
 # with --tags catalog_mirror alone. Every lookup is ignore_errors - a
 # missing CRD (e.g. no IDMS API on an older cluster) just reads as empty.
-# The full result is also written to outputs/catalog_mirror_check.json. Its
-# `catalogs` list groups the installed operators by the catalog image their
-# InstallPlan installed them from (packages: name, channel, version)
-# so an external script can `opm render` each image once - pull_image is
-# the ref to pull (the mirror location when a mirror set redirects it).
+# outputs/catalog_mirror_check.json is only what an external opm script
+# needs: {"operators": [{"pull_image", "packages": [{name, channel, version,
+# main, required_by}]}]} - installed operators grouped by the catalog image
+# their InstallPlan installed them from, pull_image being the ref to pull
+# (the mirror location when a mirror set redirects it). main=false marks
+# sub-operators another operator pulled in (see catalog_mirror_report()).
+# The mirror findings themselves are in the report (section 14).
 #
 # Always runs (no enable flag): skipping it would let a mirrored cluster
 # with default sources or old-catalog InstallPlans report as healthy.
@@ -108,7 +110,8 @@
             _cm_installplans_raw.resources | default([]),
             catalog_default_sources,
             itms=_cm_itms_raw.resources | default([]),
-            csvs=_cm_csvs_raw.resources | default([])) }}"
+            csvs=_cm_csvs_raw.resources | default([]),
+            suboperator_parents=catalog_suboperator_parents) }}"
 
     - name: Record catalog mirror findings
       ansible.builtin.set_fact:
@@ -125,6 +128,6 @@
 
     - name: Write catalog_mirror_check.json
       ansible.builtin.copy:
-        content: "{{ catalog_mirror_data | to_nice_json }}\n"
+        content: "{{ catalog_mirror_data.catalog_export | to_nice_json }}\n"
         dest: "{{ catalog_render_output_dir }}/catalog_mirror_check.json"
         mode: "0644"

@@ -299,6 +299,13 @@ catalog_render_output_dir: "{{ cluster_operators_output_dir }}"
 # CRITICAL per operator whose InstallPlan/Subscription is still bound to a
 # default (or deleted) catalog instead of a mirrored one.
 # Also writes <catalog_render_output_dir>/catalog_mirror_check.json.
+# Sub-operators created by another operator's own controller rather than
+# by OLM dependency resolution (those already carry olm.managed=true), as
+# {sub-operator package: [parent packages]}. A package listed here is
+# marked main=false in catalog_mirror_check.json when a parent is
+# subscribed on the cluster.
+catalog_suboperator_parents:
+  multicluster-engine: [advanced-cluster-management]   # ACM's MultiClusterHub creates the MCE Subscription
 catalog_default_sources:
   - redhat-operators
   - certified-operators
