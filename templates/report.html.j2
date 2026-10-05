@@ -259,6 +259,9 @@
   {% else %}
   <p class="note">Dynamic CRD scan was skipped (<code>finalizer_scan_include_crs=false</code>) - only Namespaces/PersistentVolumes/PersistentVolumeClaims were checked.</p>
   {% endif %}
+  {% if finalizer_stuck_data.excluded_namespaces | default([]) | length > 0 %}
+  <p class="note">Namespaces excluded (<code>finalizer_scan_exclude_namespaces</code>): {{ finalizer_stuck_data.excluded_namespaces | join(', ') }} &mdash; {{ finalizer_stuck_data.excluded }} object(s) being deleted there were not reported. Cluster-scoped objects are always checked.</p>
+  {% endif %}
   {% set stuck_rows = finalizer_stuck_data.rows | selectattr('severity', 'equalto', 'CRITICAL') | list %}
   {% if stuck_rows | length == 0 %}
   <p class="note">No resources found stuck Terminating.</p>

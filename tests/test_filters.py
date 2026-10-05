@@ -157,6 +157,22 @@ check("widget-stuck carries its owning CRD name", fin_by_name["widget-stuck"]["c
 check("the failed CRD listing is counted, not silently dropped", fin["crds_failed"] == 1)
 check("age_human is a short human string, not raw seconds", fin_by_name["stuck-ns"]["age_human"] == "40m0s")
 
+fin_ex = f.finalizer_stuck_report(
+    {"Namespace": [{"metadata": {"name": "openshift-foo", "deletionTimestamp": "2026-08-23T19:00:00Z", "finalizers": ["kubernetes"]}}],
+     "PersistentVolume": [{"metadata": {"name": "pv-stuck", "deletionTimestamp": "2026-08-23T19:00:00Z", "finalizers": ["kubernetes.io/pv-protection"]}}],
+     "PersistentVolumeClaim": [
+         {"metadata": {"name": "odf-pvc", "namespace": "openshift-storage", "deletionTimestamp": "2026-08-23T19:00:00Z", "finalizers": ["kubernetes.io/pvc-protection"]}},
+         {"metadata": {"name": "app-pvc", "namespace": "myapp", "deletionTimestamp": "2026-08-23T19:00:00Z", "finalizers": ["kubernetes.io/pvc-protection"]}},
+         {"metadata": {"name": "ns-exact", "namespace": "openshift", "deletionTimestamp": "2026-08-23T19:00:00Z", "finalizers": ["x"]}},
+     ]},
+    [], fx.NOW_ISO, 600, ["openshift", "openshift-*"],
+)
+fin_ex_names = {r["name"] for r in fin_ex["rows"]}
+check("exclude_namespaces skips namespaced objects in openshift-* and in exact 'openshift'", "odf-pvc" not in fin_ex_names and "ns-exact" not in fin_ex_names)
+check("exclude_namespaces skips the matching Namespace objects themselves", "openshift-foo" not in fin_ex_names)
+check("exclude_namespaces keeps user namespaces and cluster-scoped objects", fin_ex_names == {"app-pvc", "pv-stuck"})
+check("excluded objects are counted for the report", fin_ex["excluded"] == 3 and fin_ex["excluded_namespaces"] == ["openshift", "openshift-*"])
+
 # ---- deprecated_api_report --------------------------------------------------
 dep = f.deprecated_api_report(fx.APIREQUESTCOUNTS, [], 1, "1.29")  # target = OCP 4.16 -> k8s 1.29
 check("cluster_summary excludes resources with no removedInRelease", len(dep["cluster_summary"]) == 2)

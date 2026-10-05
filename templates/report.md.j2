@@ -210,6 +210,9 @@ Dynamic CRD scan: {{ finalizer_stuck_data.crds_scanned }} CustomResourceDefiniti
 {% else %}
 Dynamic CRD scan was skipped (`finalizer_scan_include_crs=false`) - only Namespaces/PersistentVolumes/PersistentVolumeClaims were checked.
 {% endif %}
+{% if finalizer_stuck_data.excluded_namespaces | default([]) | length > 0 %}
+Namespaces excluded (`finalizer_scan_exclude_namespaces`): {{ finalizer_stuck_data.excluded_namespaces | join(', ') }} - {{ finalizer_stuck_data.excluded }} object(s) being deleted there were not reported. Cluster-scoped objects are always checked.
+{% endif %}
 
 {% set stuck_rows = finalizer_stuck_data.rows | selectattr('severity', 'equalto', 'CRITICAL') | list %}
 {% if stuck_rows | length == 0 %}

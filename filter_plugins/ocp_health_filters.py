@@ -653,11 +653,23 @@ def crd_scan_targets(crds: List[dict], exclude_names: Optional[List[str]] = None
     return targets
 
 
+def _ns_excluded(ns: str, patterns: Optional[List[str]]) -> bool:
+    """True when namespace `ns` matches an exact name or a trailing-'*'
+    prefix pattern (e.g. "openshift-*") in `patterns`."""
+    for pat in patterns or []:
+        if pat.endswith("*") and ns.startswith(pat[:-1]):
+            return True
+        if pat == ns:
+            return True
+    return False
+
+
 def finalizer_stuck_report(
     fixed_resources: Dict[str, List[dict]],
     crd_scan_results: List[dict],
     now_iso: str,
     stuck_after_seconds: int = 600,
+    exclude_namespaces: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Flag any object with both a deletionTimestamp AND finalizers set - i.e.
     deletion was requested but something (a controller/webhook that no longer
@@ -666,15 +678,27 @@ def finalizer_stuck_report(
     built-in kinds we always check (Namespace/PersistentVolume/
     PersistentVolumeClaim); `crd_scan_results` is the raw registered result of
     looping kubernetes.core.k8s_info over crd_scan_targets() (each entry has
-    `.item` = the target dict and `.resources`/`.failed` from the module)."""
+    `.item` = the target dict and `.resources`/`.failed` from the module).
+
+    `exclude_namespaces` (exact names or trailing-'*' patterns, e.g.
+    "openshift-*") skips namespaced objects in those namespaces and the
+    matching Namespace objects themselves; cluster-scoped objects (PVs,
+    cluster-scoped CRs) are always checked. `excluded` counts objects that
+    would have been reported but were skipped this way."""
     now = _parse_ts(now_iso)
     rows: List[dict] = []
+    excluded_count = 0
 
     def process(kind: str, crd_name: str, items: List[dict]):
+        nonlocal excluded_count
         for obj in items or []:
             deletion_ts = _get(obj, "metadata.deletionTimestamp")
             finalizers = _get(obj, "metadata.finalizers", []) or []
             if not deletion_ts or not finalizers:
+                continue
+            ns = _get(obj, "metadata.namespace", "") or (_get(obj, "metadata.name", "") if kind == "Namespace" else "")
+            if ns and _ns_excluded(ns, exclude_namespaces):
+                excluded_count += 1
                 continue
             dt = _parse_ts(deletion_ts)
             age_seconds = (now - dt).total_seconds() if (dt and now) else None
@@ -712,6 +736,8 @@ def finalizer_stuck_report(
         "rows": rows,
         "crds_scanned": len(crd_scan_results or []),
         "crds_failed": crds_failed,
+        "excluded_namespaces": list(exclude_namespaces or []),
+        "excluded": excluded_count,
     }
 
 
@@ -735,12 +761,7 @@ def deprecated_api_report(
     target_tuple = _k8s_minor_tuple(target_k8s_minor) if target_k8s_minor else None
 
     def excluded(ns: str) -> bool:
-        for pat in exclude_namespaces:
-            if pat.endswith("*") and ns.startswith(pat[:-1]):
-                return True
-            if pat == ns:
-                return True
-        return False
+        return _ns_excluded(ns, exclude_namespaces)
 
     by_namespace: Dict[str, Dict[str, dict]] = {}
     cluster_summary: Dict[str, dict] = {}

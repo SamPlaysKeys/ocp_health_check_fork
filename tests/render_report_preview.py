@@ -30,6 +30,7 @@ finalizer_stuck_data = f.finalizer_stuck_report(
     fx.CRD_SCAN_RESULTS,
     fx.NOW_ISO,
     600,
+    ["openshift", "openshift-*"],
 )
 # Mixed-severity scenario (slow/down endpoint, db near quota, active alarm) so the
 # preview exercises every severity color in all three etcd tables at once.
