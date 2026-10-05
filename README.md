@@ -629,9 +629,9 @@ What the check reports:
         "pull_image": "mirror.local:5000/olm/redhat/redhat-operator-index:v4.18",
         "packages": [
           {"name": "devworkspace-operator", "channel": "fast", "version": "0.43.0",
-           "main": false, "required_by": ["web-terminal"]},
+           "max_ocp_version": "", "main": false, "required_by": ["web-terminal"]},
           {"name": "web-terminal", "channel": "fast", "version": "1.13.1",
-           "main": true, "required_by": []}
+           "max_ocp_version": "", "main": true, "required_by": []}
         ]
       }
     ]
@@ -654,6 +654,12 @@ What the check reports:
     `version` is the installed CSV's `spec.version`. These match `opm`'s
     `package`, channel `name` and bundle `version`. The same package,
     channel and version installed in several namespaces is listed once.
+  - `max_ocp_version` is the `olm.maxOpenShiftVersion` the installed CSV
+    declares (from its `olm.properties` annotation, the same one OLM reads),
+    or `""` when it declares none. If it is lower than a release on
+    `ocp_path`, OLM blocks the cluster upgrade to that release until the
+    operator is upgraded. The playbook reports that as a CRITICAL
+    "Operator max OpenShift version" finding.
   - `main: false` marks a sub-operator that another operator pulled in.
     Either OLM created its Subscription to satisfy a dependency (label
     `olm.managed: "true"`), or a parent listed for it in

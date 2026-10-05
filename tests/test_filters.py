@@ -517,8 +517,8 @@ _rh_img = "registry.redhat.io/redhat/redhat-operator-index:v4.20"
 _names = lambda img: [p["name"] for p in cg_by_image[img]["packages"]]
 check("catalogs has one entry per catalog image an operator was installed from",
       set(cg_by_image) == {_mirror_img, _rh_img, "quay.io/acme/custom-index:latest"})
-check("packages items are {name, channel, version, main, required_by}, version from the installed CSV",
-      cg_by_image[_mirror_img]["packages"] == [{"name": "cluster-logging", "channel": "stable-6.2", "version": "6.2.0", "main": True, "required_by": []}])
+check("packages items are {name, channel, version, max_ocp_version, main, required_by}, version from the installed CSV",
+      cg_by_image[_mirror_img]["packages"] == [{"name": "cluster-logging", "channel": "stable-6.2", "version": "6.2.0", "max_ocp_version": "", "main": True, "required_by": []}])
 check("operator is grouped under its InstallPlan's catalog even when the Subscription was re-pointed to the mirror",
       "kubevirt-hyperconverged" in _names(_rh_img) and "kubevirt-hyperconverged" not in _names(_mirror_img))
 check("InstallPlan catalog grouping: odf-operator under the default catalog it was installed from", "odf-operator" in _names(_rh_img))
@@ -563,8 +563,8 @@ check("multicluster-engine installed on its own (no ACM subscribed) stays main=t
       _mce_alone["catalogs"][0]["packages"][0]["main"] is True)
 check("catalog_export is exactly {operators: [{pull_image, packages}]}",
       set(so["catalog_export"]) == {"operators"} and all(set(o) == {"pull_image", "packages"} for o in so["catalog_export"]["operators"]))
-check("catalog_export packages are {name, channel, version, main, required_by}",
-      all(set(p) == {"name", "channel", "version", "main", "required_by"} for o in so["catalog_export"]["operators"] for p in o["packages"]))
+check("catalog_export packages are {name, channel, version, max_ocp_version, main, required_by}",
+      all(set(p) == {"name", "channel", "version", "max_ocp_version", "main", "required_by"} for o in so["catalog_export"]["operators"] for p in o["packages"]))
 check("catalog_export has one entry per pull_image with all its packages",
       [(o["pull_image"], [p["name"] for p in o["packages"]]) for o in so["catalog_export"]["operators"]]
       == [("registry.redhat.io/redhat/redhat-operator-index:v4.18",
@@ -582,6 +582,24 @@ check("explicit target version wins; two-release span -> eus",
 check("explicit major.minor target is accepted", f.catalog_export_cluster("4.18.28", "4.19")["ocp_path"] == ["4.18", "4.19"])
 check("target not newer than current -> error, not a crash", "error" in f.catalog_export_cluster("4.18.28", "4.18.30"))
 check("unparseable current version -> error, not a crash", "error" in f.catalog_export_cluster(""))
+
+# ---- maxOpenShiftVersion -------------------------------------------------------
+_mx_csv = lambda v: {"metadata": {"annotations": {"olm.properties": json.dumps([{"type": "olm.maxOpenShiftVersion", "value": v}])}}}
+check("_csv_max_ocp reads olm.properties and normalises to major.minor", f._csv_max_ocp(_mx_csv("4.19")) == "4.19" and f._csv_max_ocp(_mx_csv("4.18.0")) == "4.18")
+check("_csv_max_ocp handles a numeric value and a quoted string", f._csv_max_ocp(_mx_csv(4.18)) == "4.18" and f._csv_max_ocp(_mx_csv('"4.19"')) == "4.19")
+check("_csv_max_ocp returns '' when none is declared or the annotation is garbage",
+      f._csv_max_ocp({"metadata": {}}) == "" and f._csv_max_ocp({"metadata": {"annotations": {"olm.properties": "{{nope"}}}) == "")
+_mx_csvs = [dict(c) for c in fx.SUBOP_CSVS]
+_mx_csvs[0] = dict(_mx_csvs[0], metadata=dict(_mx_csvs[0]["metadata"], annotations={"olm.properties": json.dumps([{"type": "olm.maxOpenShiftVersion", "value": "4.19"}])}))
+mx = f.catalog_mirror_report([], [], [], fx.SUBOP_CATALOGSOURCES, fx.SUBOP_SUBSCRIPTIONS, fx.SUBOP_INSTALLPLANS, csvs=_mx_csvs)
+mx_pkgs = {p["name"]: p for o in mx["catalog_export"]["operators"] for p in o["packages"]}
+check("export carries max_ocp_version per package ('' when none declared)",
+      mx_pkgs["web-terminal"]["max_ocp_version"] == "4.19" and mx_pkgs["devworkspace-operator"]["max_ocp_version"] == "")
+mxf = f.catalog_max_ocp_findings(mx["catalog_export"], ["4.18", "4.19", "4.20"])
+check("max 4.19 on an EUS 4.18->4.20 path -> one CRITICAL naming the first blocked release 4.20",
+      len(mxf) == 1 and mxf[0]["severity"] == "CRITICAL" and "web-terminal" in mxf[0]["summary"] and "upgrade to 4.20" in mxf[0]["summary"])
+check("max 4.19 on a 4.18->4.19 path -> nothing flagged", f.catalog_max_ocp_findings(mx["catalog_export"], ["4.18", "4.19"]) == [])
+check("catalog_max_ocp_findings tolerates an empty export/path", f.catalog_max_ocp_findings({}, []) == [])
 
 print()
 if failures:

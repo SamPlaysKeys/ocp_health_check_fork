@@ -1770,6 +1770,53 @@ def _mirror_rewrite(image: str, source: str, mirror: str) -> str:
     return mirror.rstrip("/") + image[len(source):]
 
 
+def _csv_max_ocp(csv: dict) -> str:
+    """The olm.maxOpenShiftVersion an installed CSV declares, as
+    'major.minor', or '' when it declares none. OLM reads it from the CSV's
+    `olm.properties` annotation (a JSON list of {type, value}) to set the
+    operator-lifecycle-manager ClusterOperator Upgradeable=False; the
+    bundle-level `operatorframework.io/properties` annotation is checked
+    too."""
+    annotations = _get(csv, "metadata.annotations", {}) or {}
+    for key in ("olm.properties", "operatorframework.io/properties"):
+        try:
+            props = json.loads(annotations.get(key) or "[]")
+        except (ValueError, TypeError):
+            continue
+        if isinstance(props, dict):
+            props = props.get("properties", [])
+        for p in props if isinstance(props, list) else []:
+            if isinstance(p, dict) and p.get("type") == "olm.maxOpenShiftVersion":
+                m = re.match(r"^v?(\d+)\.(\d+)", str(p.get("value", "")).strip().strip('"'))
+                if m:
+                    return f"{m.group(1)}.{m.group(2)}"
+    return ""
+
+
+def catalog_max_ocp_findings(catalog_export: Dict[str, Any], ocp_path: List[str]) -> List[dict]:
+    """CRITICAL finding per exported package whose installed CSV declares an
+    olm.maxOpenShiftVersion lower than a release on the upgrade path: OLM
+    blocks the cluster from moving past that version until the operator is
+    upgraded. Names the first release it blocks. Never raises."""
+    def key(v):
+        m = re.match(r"^(\d+)\.(\d+)", str(v))
+        return (int(m.group(1)), int(m.group(2))) if m else None
+    path = [k for k in (key(v) for v in ocp_path or []) if k]
+    out = []
+    for cat in (catalog_export or {}).get("operators", []):
+        for p in cat.get("packages", []):
+            mx = key(p.get("max_ocp_version", ""))
+            if not mx:
+                continue
+            blocked = [f"{a}.{b}" for a, b in path if (a, b) > mx]
+            if blocked:
+                out.append({"severity": "CRITICAL", "summary": (
+                    f"{p['name']} {p.get('version', '')} declares olm.maxOpenShiftVersion {p['max_ocp_version']} - "
+                    f"OLM blocks the cluster upgrade to {blocked[0]} until this operator is upgraded "
+                    "to a version that supports it (on the current cluster, before starting).")})
+    return out
+
+
 def catalog_export_cluster(current_version: Any, target_version: Any = "", upgrade_channel: Any = "") -> Dict[str, Any]:
     """The `cluster` block of catalog_mirror_check.json: which OCP releases
     the upgrade passes through, so a consumer knows which catalog versions
@@ -1880,7 +1927,9 @@ def catalog_mirror_report(
       plus those subscribed parents.
     - catalog_export: the same data reduced to what an opm consumer needs:
       {"operators": [{"pull_image", "packages": [{name, channel, version,
-      main, required_by}]}]}, merged by pull_image.
+      max_ocp_version, main, required_by}]}]}, merged by pull_image.
+      max_ocp_version is the installed CSV's olm.maxOpenShiftVersion
+      ('major.minor', '' when none is declared).
     - notes: plain-language explanations of what the mirror config means
       for this cluster, for the report.
     - findings (mirrored clusters only): CRITICAL when any default
@@ -1994,6 +2043,7 @@ def catalog_mirror_report(
     ip_by_key = {(_get(ip, "metadata.namespace", ""), _get(ip, "metadata.name", "")): ip for ip in installplans or []}
     csv_version = {(_get(c, "metadata.namespace", ""), _get(c, "metadata.name", "")): str(_get(c, "spec.version", "") or "")
                    for c in csvs or []}
+    csv_max_ocp = {(_get(c, "metadata.namespace", ""), _get(c, "metadata.name", "")): _csv_max_ocp(c) for c in csvs or []}
 
     # package -> packages whose bundle declares olm.package.required on it
     required_by_map: Dict[str, set] = {}
@@ -2072,6 +2122,7 @@ def catalog_mirror_report(
             "name": pkg_name,
             "channel": _get(sub, "spec.channel", "") or "",
             "version": csv_version.get((ns, csv), ""),
+            "max_ocp_version": csv_max_ocp.get((ns, csv), ""),
             "main": not (olm_managed or cfg_parents),
             "required_by": sorted(required_by_map.get(pkg_name, set()) | set(cfg_parents)),
         }
@@ -2109,6 +2160,7 @@ def catalog_mirror_report(
                 cat["packages"].append(pkg_entry)
             else:
                 same["main"] = same["main"] or pkg_entry["main"]
+                same["max_ocp_version"] = same["max_ocp_version"] or pkg_entry["max_ocp_version"]
                 same["required_by"] = sorted(set(same["required_by"]) | set(pkg_entry["required_by"]))
 
         operators.append({
@@ -2257,5 +2309,6 @@ class FilterModule(object):
             "opm_render_filter": opm_render_filter,
             "catalog_mirror_report": catalog_mirror_report,
             "catalog_export_cluster": catalog_export_cluster,
+            "catalog_max_ocp_findings": catalog_max_ocp_findings,
             "md_cell": md_cell,
         }
