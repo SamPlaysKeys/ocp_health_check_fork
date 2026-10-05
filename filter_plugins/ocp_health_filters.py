@@ -1770,6 +1770,51 @@ def _mirror_rewrite(image: str, source: str, mirror: str) -> str:
     return mirror.rstrip("/") + image[len(source):]
 
 
+def catalog_export_cluster(current_version: Any, target_version: Any = "", upgrade_channel: Any = "") -> Dict[str, Any]:
+    """The `cluster` block of catalog_mirror_check.json: which OCP releases
+    the upgrade passes through, so a consumer knows which catalog versions
+    to fetch.
+
+    The target is upgrade_target_version when given; otherwise it is
+    resolved from upgrade_channel by resolve_upgrade_channel(), defaulting
+    to 'eus' - an even current minor goes +2, an odd one +1. `channel` is
+    'eus' when the path spans two releases and the channel prefix
+    otherwise ('stable' for a one-release EUS jump such as 4.19 -> 4.20),
+    because consumers (olm-upgrade-analyzer) validate the span against it.
+    ocp_path lists every major.minor from current to target, inclusive.
+    Returns {"error": ...} instead of raising when nothing resolves."""
+    parsed = _parse_ocp_version(current_version)
+    if not parsed:
+        return {"error": f"could not parse current version '{current_version}'"}
+    major, minor, _ = parsed
+    requested = str(upgrade_channel or "").strip()
+    prefix_match = re.match(r"^([a-z]+)", requested)
+    prefix = prefix_match.group(1) if prefix_match else "eus"
+
+    target = str(target_version or "").strip()
+    if target:
+        tparsed = _parse_ocp_version(target) or _parse_ocp_version(target + ".0")
+        if not tparsed:
+            return {"error": f"could not parse target version '{target}'"}
+        tmajor, tminor = tparsed[0], tparsed[1]
+    else:
+        res = resolve_upgrade_channel(current_version, requested or "eus")
+        if "error" in res:
+            return {"error": res["error"]}
+        tmajor, tminor = res["target_major"], res["target_minor"]
+        target = f"{tmajor}.{tminor}"
+    if tmajor != major or tminor <= minor:
+        return {"error": f"target {target} is not a newer minor of {major}.{minor}"}
+
+    span = tminor - minor
+    return {
+        "current": str(current_version),
+        "target": target,
+        "channel": "eus" if span == 2 else (prefix if prefix != "eus" else "stable"),
+        "ocp_path": [f"{major}.{m}" for m in range(minor, tminor + 1)],
+    }
+
+
 def catalog_mirror_report(
     idms: List[dict],
     icsp: List[dict],
@@ -2211,5 +2256,6 @@ class FilterModule(object):
             "catalog_render_filename": catalog_render_filename,
             "opm_render_filter": opm_render_filter,
             "catalog_mirror_report": catalog_mirror_report,
+            "catalog_export_cluster": catalog_export_cluster,
             "md_cell": md_cell,
         }

@@ -30,8 +30,11 @@
 # with --tags catalog_mirror alone. Every lookup is ignore_errors - a
 # missing CRD (e.g. no IDMS API on an older cluster) just reads as empty.
 # outputs/catalog_mirror_check.json is only what an external opm script
-# needs: {"operators": [{"pull_image", "packages": [{name, channel, version,
-# main, required_by}]}]} - installed operators grouped by the catalog image
+# needs: {"cluster": {current, target, channel, ocp_path}, "operators":
+# [{"pull_image", "packages": [{name, channel, version, main,
+# required_by}]}]} - ocp_path being the releases whose catalogs to fetch
+# (target from upgrade_target_version, else upgrade_channel, else EUS:
+# even minor +2, odd +1), and the installed operators grouped by the catalog image
 # their InstallPlan installed them from, pull_image being the ref to pull
 # (the mirror location when a mirror set redirects it). main=false marks
 # sub-operators another operator pulled in (see catalog_mirror_report()).
@@ -100,6 +103,14 @@
       register: _cm_installplans_raw
       ignore_errors: true
 
+    - name: Read ClusterVersion (current version for the export's upgrade path)
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: ClusterVersion
+        name: version
+      register: _cm_clusterversion_raw
+      ignore_errors: true
+
     - name: Build the catalog mirror report
       ansible.builtin.set_fact:
         catalog_mirror_data: "{{ (_cm_idms_raw.resources | default([])) | catalog_mirror_report(
@@ -126,8 +137,19 @@
         state: directory
         mode: "0755"
 
+    - name: Resolve the upgrade path for the export (upgrade_target_version, else upgrade_channel, else EUS)
+      ansible.builtin.set_fact:
+        _cm_export_cluster: "{{ ((_cm_clusterversion_raw.resources | default([{}]) | first | default({})).status.desired.version | default(''))
+            | catalog_export_cluster(upgrade_target_version | default(''), upgrade_channel | default('')) }}"
+
+    - name: Flag when the export's upgrade path could not be resolved
+      ansible.builtin.set_fact:
+        findings: "{{ findings + [{'section': 'Catalog mirror (IDMS/ICSP/ITMS)', 'severity': 'WARNING',
+          'summary': 'catalog_mirror_check.json has no usable cluster block: ' ~ _cm_export_cluster.error}] }}"
+      when: _cm_export_cluster.error is defined
+
     - name: Write catalog_mirror_check.json
       ansible.builtin.copy:
-        content: "{{ catalog_mirror_data.catalog_export | to_nice_json }}\n"
+        content: "{{ ({'cluster': _cm_export_cluster} | combine(catalog_mirror_data.catalog_export)) | to_nice_json }}\n"
         dest: "{{ catalog_render_output_dir }}/catalog_mirror_check.json"
         mode: "0644"
