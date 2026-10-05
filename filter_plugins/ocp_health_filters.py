@@ -1820,7 +1820,9 @@ def catalog_mirror_report(
       channel (Subscription), version (installed CSV's spec.version when
       `csvs` is given)} per operator - the same package+channel+version in
       several namespaces is one entry. Operators whose catalog can't be
-      resolved to an image go to unresolved_operators.
+      resolved to an image go to unresolved_operators; Subscriptions with
+      nothing installed yet (no status.installedCSV - e.g. a Manual
+      InstallPlan awaiting approval) go to not_installed_operators.
     - notes: plain-language explanations of what the mirror config means
       for this cluster, for the report.
     - findings (mirrored clusters only): CRITICAL when any default
@@ -1937,6 +1939,7 @@ def catalog_mirror_report(
 
     catalogs_by_image: Dict[str, dict] = {}
     unresolved_operators: List[dict] = []
+    not_installed_operators: List[dict] = []
     operators = []
     for sub in subscriptions or []:
         ns = _get(sub, "metadata.namespace", "")
@@ -1991,7 +1994,16 @@ def catalog_mirror_report(
             "channel": _get(sub, "spec.channel", "") or "",
             "version": csv_version.get((ns, csv), ""),
         }
-        if not cat_image:
+        if not _get(sub, "status.installedCSV"):
+            # Nothing installed yet (e.g. a Manual InstallPlan awaiting
+            # approval, or a failed install): no version to look up.
+            not_installed_operators.append({
+                "name": pkg_entry["name"], "channel": pkg_entry["channel"],
+                "pending_csv": _get(sub, "status.currentCSV", "") or "",
+                "state": _get(sub, "status.state", "") or "",
+                "namespace": ns,
+            })
+        elif not cat_image:
             unresolved_operators.append(dict(pkg_entry, catalog_source=cat_name, catalog_source_namespace=cat_ns))
         else:
             path = path_by_key[(cat_ns, cat_name)]
@@ -2033,6 +2045,7 @@ def catalog_mirror_report(
         cat["packages"].sort(key=lambda p: (p["name"], p["channel"], p["version"]))
         catalogs.append(cat)
     unresolved_operators.sort(key=lambda o: (o["name"], o["channel"]))
+    not_installed_operators.sort(key=lambda o: (o["name"], o["namespace"]))
 
     notes: List[str] = []
     if not mirror_configured:
@@ -2103,6 +2116,7 @@ def catalog_mirror_report(
         "operators": operators,
         "catalogs": catalogs,
         "unresolved_operators": unresolved_operators,
+        "not_installed_operators": not_installed_operators,
         "notes": notes,
         "findings": findings,
     }

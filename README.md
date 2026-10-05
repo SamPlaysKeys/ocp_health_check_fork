@@ -650,6 +650,9 @@ What the check reports:
     several namespaces is listed once.
   - `unresolved_operators` lists Subscriptions whose CatalogSource no longer
     exists, so they have no image to render.
+  - `not_installed_operators` lists Subscriptions with nothing installed
+    yet, for example a Manual InstallPlan awaiting approval. Each entry has
+    `pending_csv` and the Subscription `state`.
 
   The rest of the file is the mirror check result shown in report section 14.
 - On a connected cluster (no IDMS, ICSP or ITMS), the tables are still built but

@@ -524,6 +524,13 @@ check("operator is grouped under its InstallPlan's catalog even when the Subscri
 check("InstallPlan catalog grouping: odf-operator under the default catalog it was installed from", "odf-operator" in _names(_rh_img))
 check("no InstallPlan -> falls back to the Subscription's catalog; missing CatalogSource -> unresolved_operators",
       [p["name"] for p in cg["unresolved_operators"]] == ["certified-thing"] and cg["unresolved_operators"][0]["catalog_source"] == "certified-operators")
+_pending = f.catalog_mirror_report([], [], [], fx.MIRROR_CATALOGSOURCES, [{
+    "metadata": {"name": "web-terminal", "namespace": "openshift-operators"},
+    "spec": {"name": "web-terminal", "channel": "fast", "source": "cs-redhat-operator-index", "sourceNamespace": "openshift-marketplace"},
+    "status": {"currentCSV": "web-terminal.v1.13.1", "state": "UpgradePending"}}], [])
+check("Subscription with no installedCSV (Manual InstallPlan awaiting approval) is not_installed, not in any catalog's packages",
+      _pending["catalogs"] == [] and _pending["not_installed_operators"] == [
+          {"name": "web-terminal", "channel": "fast", "pending_csv": "web-terminal.v1.13.1", "state": "UpgradePending", "namespace": "openshift-operators"}])
 check("catalog on a mirror host: pull_image is the image itself", cg_by_image[_mirror_img]["pull_image"] == _mirror_img and cg_by_image[_mirror_img]["pulled_from"] == "mirror-host")
 check("default catalog entry is marked default with its CatalogSource ref",
       cg_by_image[_rh_img]["default"] and cg_by_image[_rh_img]["catalog_sources"] == [{"name": "redhat-operators", "namespace": "openshift-marketplace"}])
