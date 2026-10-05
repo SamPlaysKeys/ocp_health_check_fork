@@ -64,15 +64,15 @@
       ansible.builtin.set_fact:
         crd_scan_targets_list: "{{ (_crd_raw.resources | default([])) | crd_scan_targets(finalizer_scan_exclude_crds) }}"
 
-    - name: List every instance of every scanned CRD kind, cluster-wide
-      kubernetes.core.k8s_info:
-        api_version: "{{ item.group }}/{{ item.version }}"
-        kind: "{{ item.kind }}"
+    # One include per kind, keeping only objects being deleted - see
+    # tasks/65a_finalizer_scan_one.yml for why this isn't a single looped
+    # k8s_info (worker ran out of memory on large clusters).
+    - name: Scan every CRD kind for objects being deleted, one kind at a time
+      ansible.builtin.include_tasks: 65a_finalizer_scan_one.yml
       loop: "{{ crd_scan_targets_list }}"
       loop_control:
-        label: "{{ item.kind }}"
-      register: _cr_scan_raw
-      ignore_errors: true
+        loop_var: _fs_target
+        label: "{{ _fs_target.kind }}"
 
 - name: Build the stuck-finalizer report
   ansible.builtin.set_fact:

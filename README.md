@@ -832,12 +832,16 @@ tasks/40_machineconfigpools.yml
 tasks/50_machinesets.yml
 tasks/60_deprecated_apis.yml
 tasks/65_stuck_finalizers.yml
+tasks/65a_finalizer_scan_one.yml     included per CRD kind from 65 (keeps only objects being deleted)
 tasks/70_portworx.yml
 tasks/80_openshift_virtualization.yml
 tasks/85_acm.yml                   ACM hub health, managed-cluster inventory, cascade
 tasks/85a_acm_wait_msa_secret.yml    included per-cluster from 85_acm.yml
 tasks/87_odf.yml                   OpenShift Data Foundation (ODF) + Ceph/OSD checks
 tasks/88_cluster_operators_installed.yml   writes outputs/cluster_operators_installed.json + .md
+tasks/89_catalog_opm_render.yml    per-catalog opm render -> outputs/<catalog>_<tag>.json
+tasks/89a_catalog_opm_render_one.yml included per catalog from 89
+tasks/89b_catalog_mirror_check.yml IDMS/ICSP/ITMS vs default catalogs and InstallPlans -> outputs/catalog_mirror_check.json
 tasks/90_render_report.yml         renders templates, fails on CRITICAL
 filter_plugins/ocp_health_filters.py   all the report-building logic (unit tested)
 templates/report.md.j2 / report.html.j2 / report_summary.html.j2

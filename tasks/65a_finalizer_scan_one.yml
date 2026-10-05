@@ -1,0 +1,26 @@
+---
+# Included once per CRD kind (via `loop:` on include_tasks in
+# tasks/65_stuck_finalizers.yml). Expects `_fs_target` (one row from
+# crd_scan_targets_list: crd_name, group, version, kind, scope).
+#
+# Lists one kind, then immediately keeps only the objects that are being
+# deleted (metadata.deletionTimestamp set) - the only ones
+# finalizer_stuck_report() looks at. A single looped k8s_info over every
+# kind kept every object of every CRD in one registered result, which ran
+# the Ansible worker out of memory on large clusters ("A worker was found in
+# a dead state"); this way at most one kind's list is held at a time.
+- name: "List {{ _fs_target.kind }} ({{ _fs_target.crd_name }}), cluster-wide"
+  kubernetes.core.k8s_info:
+    api_version: "{{ _fs_target.group }}/{{ _fs_target.version }}"
+    kind: "{{ _fs_target.kind }}"
+  register: _fs_one_raw
+  ignore_errors: true
+
+- name: "Keep only {{ _fs_target.kind }} objects being deleted"
+  ansible.builtin.set_fact:
+    _cr_scan_raw: "{{ {'results': _cr_scan_raw.results + [{
+        'item': _fs_target,
+        'failed': _fs_one_raw is failed,
+        'resources': (_fs_one_raw.resources | default([]) | selectattr('metadata.deletionTimestamp', 'defined') | list),
+      }]} }}"
+    _fs_one_raw: {}
