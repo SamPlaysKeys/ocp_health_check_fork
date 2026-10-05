@@ -31,8 +31,10 @@
 # missing CRD (e.g. no IDMS API on an older cluster) just reads as empty.
 # outputs/catalog_mirror_check.json is only what an external opm script
 # needs: {"cluster": {current, target, channel, ocp_path}, "operators":
-# [{"pull_image", "packages": [{name, channel, version, main,
-# required_by}]}]} - ocp_path being the releases whose catalogs to fetch
+# [{"pull_image", "packages": [{name, channel, version, max_ocp_version,
+# main, required_by}]}]}. An installed CSV whose olm.maxOpenShiftVersion is
+# below a release on ocp_path is also a CRITICAL finding (OLM blocks the
+# cluster upgrade until that operator is upgraded) - ocp_path being the releases whose catalogs to fetch
 # (target from upgrade_target_version, else upgrade_channel, else EUS:
 # even minor +2, odd +1), and the installed operators grouped by the catalog image
 # their InstallPlan installed them from, pull_image being the ref to pull
@@ -141,6 +143,13 @@
       ansible.builtin.set_fact:
         _cm_export_cluster: "{{ ((_cm_clusterversion_raw.resources | default([{}]) | first | default({})).status.desired.version | default(''))
             | catalog_export_cluster(upgrade_target_version | default(''), upgrade_channel | default('')) }}"
+
+    - name: Flag installed operators whose maxOpenShiftVersion is below a release on the upgrade path
+      ansible.builtin.set_fact:
+        findings: "{{ findings + [{'section': 'Operator max OpenShift version', 'severity': item.severity, 'summary': item.summary}] }}"
+      loop: "{{ catalog_mirror_data.catalog_export | catalog_max_ocp_findings(_cm_export_cluster.ocp_path | default([])) }}"
+      loop_control:
+        label: "{{ item.summary[:60] }}"
 
     - name: Flag when the export's upgrade path could not be resolved
       ansible.builtin.set_fact:
