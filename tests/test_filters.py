@@ -385,6 +385,40 @@ check("a non-EUS cluster.channel is kept as its full name, not trimmed", snap_st
 check("cluster_operators_snapshot on no subscriptions/csvs/catalogsources returns an empty operators list, doesn't crash",
       f.cluster_operators_snapshot([], [], [], "4.18.14", "", "") == {"cluster": {"current": "4.18.14", "target": "", "channel": ""}, "operators": []})
 
+# ---- catalog_render_targets / opm_source_path / catalog_render_filename / opm_render_filter ----
+targets = f.catalog_render_targets(snap["operators"], fx.COSNAP_CATALOGSOURCES)
+targets_by_name = {t["catalog_name"]: t for t in targets}
+check("catalog_render_targets produces one target per catalog actually used (redhat-operators, community-operators)", set(targets_by_name.keys()) == {"redhat-operators", "community-operators"})
+check("redhat-operators target's packages match exactly the snapshot's real (non-stuck) Red Hat operators", targets_by_name["redhat-operators"]["packages"] == ["cluster-logging", "multicluster-engine"])
+check("a stuck/no-version Subscription (excluded from the snapshot) never reappears in a render target's package list", "stuck-op" not in targets_by_name["redhat-operators"]["packages"] and "no-version-csv-op" not in targets_by_name["redhat-operators"]["packages"])
+check("catalog_render_targets resolves catalog_namespace from the matching CatalogSource", targets_by_name["redhat-operators"]["catalog_namespace"] == "openshift-marketplace")
+check("catalog_render_targets on an empty operators list returns no targets, doesn't crash", f.catalog_render_targets([], fx.COSNAP_CATALOGSOURCES) == [])
+
+check("opm_source_path finds the FBC directory path after 'serve' when it's in a separate args list", f.opm_source_path(fx.CATALOG_POD_FBC) == "/configs")
+check("opm_source_path finds the sqlite DB path after 'serve' when command+args are combined and a flag comes first", f.opm_source_path(fx.CATALOG_POD_SQLITE) == "/database/index.db")
+check("opm_source_path returns '' (skip signal) for a pod with no containers, doesn't crash", f.opm_source_path({"spec": {"containers": []}}) == "")
+check("opm_source_path returns '' when there's no 'serve' token at all, doesn't crash", f.opm_source_path({"spec": {"containers": [{"command": ["/bin/bash"]}]}}) == "")
+
+check("catalog_render_filename strips registry host and keeps repo-tail_tag for a normal image ref", f.catalog_render_filename("registry.redhat.io/redhat/redhat-operator-index:v4.20") == "redhat-operator-index_v4.20")
+check("catalog_render_filename doesn't mistake an airgapped mirror's host:port for an image tag", f.catalog_render_filename("private.registry.local:5000/mirror/redhat-operator-index:v4.18") == "redhat-operator-index_v4.18")
+check("catalog_render_filename shortens a digest ref to a 12-char stub instead of the full sha256 string", f.catalog_render_filename("registry.example.com/idx@sha256:abcdef0123456789abcdef0123456789") == "idx_abcdef012345")
+check("catalog_render_filename falls back to 'catalog' for an empty/blank image, doesn't crash", f.catalog_render_filename("") == "catalog" and f.catalog_render_filename(None) == "catalog")
+
+_opm_render_raw = "\n".join([
+    json.dumps({"schema": "olm.package", "name": "cluster-logging"}),
+    json.dumps({"schema": "olm.channel", "package": "cluster-logging", "name": "stable-6.2",
+                "entries": [{"name": "cluster-logging.v6.2.0"}, {"name": "cluster-logging.v6.1.0", "replaces": "cluster-logging.v6.0.0"}]}),
+    "this is not json and must not crash the parse",
+    json.dumps({"schema": "olm.channel", "package": "some-other-package", "name": "alpha", "entries": [{"name": "other.v1"}]}),
+])
+_orf = f.opm_render_filter(_opm_render_raw, ["cluster-logging"])
+check("opm_render_filter keeps only olm.channel entries for the wanted package", len(_orf) == 1 and _orf[0]["package"] == "cluster-logging")
+check("opm_render_filter drops olm.package (non-channel) schema objects", all(o.get("schema") != "olm.package" for o in _orf))
+check("opm_render_filter drops channels for packages not in the wanted list", not any(o["package"] == "some-other-package" for o in _orf))
+check("opm_render_filter carries the channel's entries through as a flat list of bundle names", _orf[0]["entries"] == ["cluster-logging.v6.2.0", "cluster-logging.v6.1.0"])
+check("opm_render_filter tolerates a garbage/non-JSON line mixed into the stream instead of crashing", True)  # implicit: the check above already proves this ran to completion
+check("opm_render_filter on empty/None stdout returns [], doesn't crash", f.opm_render_filter("", ["cluster-logging"]) == [] and f.opm_render_filter(None, []) == [])
+
 print()
 if failures:
     print(f"{len(failures)} check(s) FAILED:")

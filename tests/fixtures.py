@@ -606,3 +606,19 @@ COSNAP_CATALOGSOURCES = [
     {"metadata": {"name": "redhat-operators", "namespace": "openshift-marketplace"}, "spec": {"image": "registry.redhat.io/redhat/redhat-operator-index:v4.20"}},
     {"metadata": {"name": "community-operators", "namespace": "openshift-marketplace"}, "spec": {"image": "registry.redhat.io/redhat/community-operator-index:v4.20"}},
 ]
+
+# ---- Catalog opm render targeting (outputs/<catalog>_<tag>.json) ----
+# One CatalogSource Pod running a file-based-config image (command +
+# separate args, `serve /configs`), and one running a legacy sqlite-style
+# image (single command list, no `args`, database path after `serve`) -
+# covers both shapes opm_source_path() has to handle.
+CATALOG_POD_FBC = {
+    "metadata": {"name": "redhat-operators-abc12", "namespace": "openshift-marketplace"},
+    "spec": {"containers": [{"name": "registry-server", "command": ["/bin/opm"], "args": ["serve", "/configs", "--cache-dir=/tmp/cache"]}]},
+    "status": {"phase": "Running"},
+}
+CATALOG_POD_SQLITE = {
+    "metadata": {"name": "community-operators-xyz99", "namespace": "openshift-marketplace"},
+    "spec": {"containers": [{"name": "registry-server", "command": ["opm", "registry", "serve", "--database", "/database/index.db"]}]},
+    "status": {"phase": "Running"},
+}

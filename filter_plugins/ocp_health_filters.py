@@ -1525,7 +1525,158 @@ def cluster_operators_snapshot(
 
 
 # ----------------------------------------------------------------------------
-# 13. Markdown table cell escaping
+# 13. Catalog opm render targeting (outputs/<catalog>_<tag>.json)
+# ----------------------------------------------------------------------------
+# Follow-on to the cluster operators installed snapshot (section 12): for
+# every CatalogSource actually referenced by an installed Subscription, we
+# want to `opm render` that exact catalog and keep only the olm.channel
+# entries for packages this cluster has installed - so a downstream
+# consumer gets real per-channel bundle-entry metadata (for computing
+# replaces/skipRange upgrade paths itself) without this playbook rendering
+# every package in a possibly huge catalog, or walking the OLM graph here.
+# See tasks/89_catalog_opm_render.yml.
+
+def catalog_render_targets(operators: List[dict], catalogsources: List[dict]) -> List[dict]:
+    """Group cluster_operators_snapshot()'s own `operators` list (the same
+    list written to cluster_operators_installed.json - deliberately NOT
+    re-derived from raw Subscriptions here, so a stuck/no-version
+    Subscription that snapshot already excluded can't sneak back in and
+    the two output files always agree on which packages "count") by the
+    catalog image each entry came from, then resolves that image back to
+    the CatalogSource's own name+namespace (needed to find its Pod).
+
+    Each entry: {"catalog_name", "catalog_namespace", "image",
+    "packages": [sorted, deduplicated operator names]}. An operator whose
+    catalog image doesn't match any known CatalogSource still gets a
+    target (packages need the image to fall back to a raw-image opm
+    render if the caller wants that later), just with an empty
+    catalog_name/catalog_namespace - the task decides what to do with
+    that. Never raises."""
+    name_ns_by_image: Dict[str, tuple] = {}
+    for cs in catalogsources or []:
+        image = _get(cs, "spec.image", "")
+        if image and image not in name_ns_by_image:
+            name_ns_by_image[image] = (_get(cs, "metadata.name", ""), _get(cs, "metadata.namespace", ""))
+
+    packages_by_image: Dict[str, set] = {}
+    for op in operators or []:
+        image = op.get("catalog", "")
+        name = op.get("name", "")
+        if not image or not name:
+            continue
+        packages_by_image.setdefault(image, set()).add(name)
+
+    targets = []
+    for image, packages in packages_by_image.items():
+        catalog_name, catalog_ns = name_ns_by_image.get(image, ("", ""))
+        targets.append(
+            {
+                "catalog_name": catalog_name,
+                "catalog_namespace": catalog_ns,
+                "image": image,
+                "packages": sorted(packages),
+            }
+        )
+    return sorted(targets, key=lambda t: (t["catalog_namespace"], t["catalog_name"], t["image"]))
+
+
+def opm_source_path(pod: dict) -> str:
+    """Extract the <source_path> argument `opm serve` was started with,
+    from a CatalogSource Pod's own spec - so opm_render can be run against
+    that exact local path inside the already-running pod (no image
+    re-pull needed, and it works whether the catalog is a file-based
+    config directory like /configs or a legacy sqlite DB).
+
+    Looks at the first container's command+args combined (OLM has shipped
+    both `command: [opm], args: [serve, /configs]` and
+    `command: [/bin/opm, serve, /configs, ...]` across versions): finds
+    the literal 'serve' token and returns the first following argument
+    that isn't itself a flag (doesn't start with '-'). Returns '' if no
+    such path is found - the caller treats that as "skip this catalog".
+    Never raises."""
+    containers = _get(pod, "spec.containers", []) or []
+    if not containers:
+        return ""
+    argv = list(_get(containers[0], "command", []) or []) + list(_get(containers[0], "args", []) or [])
+    for i, tok in enumerate(argv):
+        if str(tok) == "serve":
+            for nxt in argv[i + 1:]:
+                if not str(nxt).startswith("-"):
+                    return str(nxt)
+            break
+    return ""
+
+
+_IMAGE_NAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def catalog_render_filename(image: Any) -> str:
+    """Turn a catalog image ref into a filesystem-safe '<name>_<tag>' stem
+    (no extension) for outputs/<name>_<tag>.json, e.g.
+    'registry.redhat.io/redhat/redhat-operator-index:v4.20' ->
+    'redhat-operator-index_v4.20', and equally for an airgapped mirror
+    like 'private.registry.local:5000/mirror/redhat-operator-index:v4.20'
+    - the registry host[:port] never ends up in the filename, only the
+    repo's last path segment and its tag/short-digest.
+
+    Falls back to 'catalog' (or 'catalog_<n>' - left to the caller to
+    dedupe) if the image string doesn't parse at all. Never raises."""
+    text = str(image or "")
+    if not text:
+        return "catalog"
+    # Split the LAST path segment off first, then split ITS tag/digest -
+    # so a registry's own 'host:port' is never mistaken for an image tag.
+    _, _, ref = text.rpartition("/")
+    if "@" in ref:
+        name_part, _, digest = ref.partition("@")
+        tag = digest.rsplit(":", 1)[-1][:12]  # short digest, not the whole sha256:...
+    elif ":" in ref:
+        name_part, _, tag = ref.partition(":")
+    else:
+        name_part, tag = ref, ""
+    name_part = _IMAGE_NAME_SANITIZE_RE.sub("-", name_part).strip("-") or "catalog"
+    tag = _IMAGE_NAME_SANITIZE_RE.sub("-", tag).strip("-")
+    return f"{name_part}_{tag}" if tag else name_part
+
+
+def opm_render_filter(raw_stdout: Any, packages: List[str]) -> List[dict]:
+    """Parse `opm render <path> -o json` output - newline-delimited JSON
+    declarative-config objects, NOT a single JSON array or a JSON stream
+    that json.loads can eat in one call - and keep only the olm.channel
+    entries for the given packages, in exactly the shape a downstream
+    consumer needs to walk replaces/skipRange itself:
+      [{"package": "...", "channel": "...", "entries": ["pkg.v1.0.0", ...]}]
+
+    Other schemas (olm.package, olm.bundle, ...) are dropped here - only
+    olm.channel carries the entries list a channel-graph walk needs, and
+    keeping everything would make this file as large as the catalog
+    itself for no benefit to that use case. Malformed/non-JSON lines are
+    skipped rather than failing the whole parse (some opm versions can
+    interleave log lines with -o json). Never raises - returns [] on
+    total failure, same defensive-parsing posture as ceph_status_report()."""
+    wanted = set(packages or [])
+    out: List[dict] = []
+    for line in str(raw_stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(obj, dict) or obj.get("schema") != "olm.channel":
+            continue
+        package = obj.get("package")
+        if not package or package not in wanted:
+            continue
+        entries = obj.get("entries") or []
+        entry_names = [e.get("name") for e in entries if isinstance(e, dict) and e.get("name")]
+        out.append({"package": package, "channel": obj.get("name", ""), "entries": entry_names})
+    return out
+
+
+# ----------------------------------------------------------------------------
+# 14. Markdown table cell escaping
 # ----------------------------------------------------------------------------
 def md_cell(value: Any) -> str:
     """Escape a value for safe use inside a GFM/CommonMark pipe-table cell:
@@ -1555,5 +1706,9 @@ class FilterModule(object):
             "cephcluster_report": cephcluster_report,
             "ceph_status_report": ceph_status_report,
             "cluster_operators_snapshot": cluster_operators_snapshot,
+            "catalog_render_targets": catalog_render_targets,
+            "opm_source_path": opm_source_path,
+            "catalog_render_filename": catalog_render_filename,
+            "opm_render_filter": opm_render_filter,
             "md_cell": md_cell,
         }
