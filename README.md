@@ -139,11 +139,22 @@ a CI/pipeline job before it starts the real upgrade.
 ## Requirements
 
 ```bash
+python3 -m venv ~/venv-ocp && source ~/venv-ocp/bin/activate   # Python 3.10+
+pip install -r requirements.txt          # ansible-core>=2.16, kubernetes, websocket-client
 ansible-galaxy collection install -r requirements.yml
-pip install -r requirements.txt --break-system-packages   # kubernetes python client
+ansible --version                        # should show core 2.16+ and the venv's Python
 ```
 
-Needs `ansible-core >= 2.15` and `kubernetes.core >= 3.0`. The account you
+Use **`ansible-core >= 2.16`** (needs **Python 3.10+**), the version current
+`kubernetes.core` releases support. 2.12 is the oldest the playbook accepts;
+2.12 to 2.15 work but print a note. The Python running Ansible also needs
+`kubernetes >= 27.2.0` and `websocket-client >= 1.6.0`. The playbook's first
+tasks check all of this and stop with a clear message otherwise.
+
+Use a virtualenv rather than the OS-packaged `ansible`: an old distro
+Ansible (e.g. 2.10) and its old `kubernetes`/`websocket-client` packages
+make every pod exec (etcd, ODF/Ceph, `opm render`) fail with errors like
+`'NoneType' object has no attribute 'decode'`. The account you
 connect with needs at least `cluster-reader` (read access to nodes,
 clusteroperators, machineconfigpools, machinesets/machines, apirequestcounts,
 and the Portworx/ODF CRs and pods if `portworx_enabled`/`odf_enabled: true`)

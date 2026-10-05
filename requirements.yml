@@ -1,5 +1,9 @@
 ---
 # Install with: ansible-galaxy collection install -r requirements.yml
+# Install ansible-core from requirements.txt first (2.16+ recommended, 2.12
+# minimum): current kubernetes.core releases warn on older Ansible, and pod
+# exec (etcd, ODF, opm render) fails with errors like "'NoneType' object has
+# no attribute 'decode'" with an old OS-packaged Ansible/kubernetes client.
 collections:
   - name: kubernetes.core
     version: ">=3.0.0"
@@ -8,7 +12,4 @@ collections:
   - name: ansible.utils
     version: ">=3.0.0"
 
-# Python dependencies (install alongside, e.g. pip install -r requirements.txt --break-system-packages):
-#   kubernetes>=27.2.0
-#   pyyaml
-#   jmespath
+# Python dependencies, including ansible-core itself: see requirements.txt.
