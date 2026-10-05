@@ -622,6 +622,8 @@ What the check reports:
 
   ```json
   {
+    "cluster": {"current": "4.18.28", "target": "4.20", "channel": "eus",
+                "ocp_path": ["4.18", "4.19", "4.20"]},
     "operators": [
       {
         "pull_image": "mirror.local:5000/olm/redhat/redhat-operator-index:v4.18",
@@ -636,6 +638,12 @@ What the check reports:
   }
   ```
 
+  - `cluster.ocp_path` lists the OCP releases the upgrade passes through,
+    and so the catalog versions to fetch, e.g. `pull_image` retagged `:v4.19`,
+    `:v4.20`. The target is `upgrade_target_version` when set. Otherwise it is
+    resolved from `upgrade_channel`, which defaults to EUS: an even current
+    minor goes +2, an odd one +1. `channel` is `eus` for a two-release path
+    and `stable` (or the given channel prefix) for a one-release path.
   - `pull_image` is the catalog ref actually pulled. When an IDMS, ICSP or
     ITMS entry redirects the CatalogSource image, it is the mirror location;
     otherwise it is the image itself.

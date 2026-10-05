@@ -570,6 +570,19 @@ check("catalog_export has one entry per pull_image with all its packages",
       == [("registry.redhat.io/redhat/redhat-operator-index:v4.18",
            ["advanced-cluster-management", "devworkspace-operator", "multicluster-engine", "web-terminal"])])
 
+# ---- catalog_export_cluster ------------------------------------------------------
+check("even current minor, nothing given -> EUS +2, channel eus, full path",
+      f.catalog_export_cluster("4.18.28") == {"current": "4.18.28", "target": "4.20", "channel": "eus", "ocp_path": ["4.18", "4.19", "4.20"]})
+check("odd current minor, nothing given -> +1 to the next even, channel stable (one-release span)",
+      f.catalog_export_cluster("4.19.10") == {"current": "4.19.10", "target": "4.20", "channel": "stable", "ocp_path": ["4.19", "4.20"]})
+check("upgrade_channel stable -> +1", f.catalog_export_cluster("4.18.28", "", "stable")["ocp_path"] == ["4.18", "4.19"])
+check("qualified upgrade_channel eus-4.20 is used as given", f.catalog_export_cluster("4.18.28", "", "eus-4.20")["target"] == "4.20")
+check("explicit target version wins; two-release span -> eus",
+      f.catalog_export_cluster("4.18.28", "4.20.12", "stable") == {"current": "4.18.28", "target": "4.20.12", "channel": "eus", "ocp_path": ["4.18", "4.19", "4.20"]})
+check("explicit major.minor target is accepted", f.catalog_export_cluster("4.18.28", "4.19")["ocp_path"] == ["4.18", "4.19"])
+check("target not newer than current -> error, not a crash", "error" in f.catalog_export_cluster("4.18.28", "4.18.30"))
+check("unparseable current version -> error, not a crash", "error" in f.catalog_export_cluster(""))
+
 print()
 if failures:
     print(f"{len(failures)} check(s) FAILED:")
