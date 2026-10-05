@@ -516,17 +516,19 @@ check("catalogs groups operators by their Subscription's catalog image (one entr
       set(cg_by_image) == {_mirror_img, "registry.redhat.io/redhat/redhat-operator-index:v4.20", "quay.io/acme/custom-index:latest"})
 check("mirrored catalog groups both operators subscribed to it, packages sorted/unique",
       cg_by_image[_mirror_img]["packages"] == ["cluster-logging", "kubevirt-hyperconverged"])
-_cl = {o["package"]: o for o in cg_by_image[_mirror_img]["operators"]}["cluster-logging"]
-check("each grouped operator carries channel, csv and the CSV's real version",
-      _cl["channel"] == "stable-6.2" and _cl["csv"] == "cluster-logging.v6.2.0" and _cl["version"] == "6.2.0")
-check("grouped operator keeps the InstallPlan catalog it was actually installed from",
-      {o["package"]: o for o in cg_by_image[_mirror_img]["operators"]}["kubevirt-hyperconverged"]["installplan_catalog"] == "redhat-operators")
+_cl = {o["name"]: o for o in cg_by_image[_mirror_img]["operators"]}["cluster-logging"]
+check("each grouped operator is exactly {name, channel, version, csv} with the CSV's real version",
+      _cl == {"name": "cluster-logging", "channel": "stable-6.2", "version": "6.2.0", "csv": "cluster-logging.v6.2.0"})
+_dup = f.catalog_mirror_report([], [], [], fx.MIRROR_CATALOGSOURCES,
+                                [fx.MIRROR_SUBSCRIPTIONS[0], dict(fx.MIRROR_SUBSCRIPTIONS[0], metadata={"name": "cluster-logging", "namespace": "other-ns"})], [])
+check("same package+channel+version subscribed in two namespaces is one catalog entry",
+      len({c["image"]: c for c in _dup["catalogs"]}[_mirror_img]["operators"]) == 1)
 check("catalog on a mirror host: pull_image is the image itself", cg_by_image[_mirror_img]["pull_image"] == _mirror_img and cg_by_image[_mirror_img]["pulled_from"] == "mirror-host")
 check("default catalog entry is marked default with its CatalogSource ref",
       cg_by_image["registry.redhat.io/redhat/redhat-operator-index:v4.20"]["default"]
       and cg_by_image["registry.redhat.io/redhat/redhat-operator-index:v4.20"]["catalog_sources"] == [{"name": "redhat-operators", "namespace": "openshift-marketplace"}])
 check("Subscription to a CatalogSource that doesn't exist goes to unresolved_operators, not a catalog",
-      [o["package"] for o in cg["unresolved_operators"]] == ["certified-thing"] and cg["unresolved_operators"][0]["catalog_source"] == "certified-operators")
+      [o["name"] for o in cg["unresolved_operators"]] == ["certified-thing"] and cg["unresolved_operators"][0]["catalog_source"] == "certified-operators")
 
 cg_itms = f.catalog_mirror_report([], [], [], fx.MIRROR_CATALOGSOURCES, fx.MIRROR_SUBSCRIPTIONS, fx.MIRROR_INSTALLPLANS, itms=fx.MIRROR_ITMS)
 _rh = {c["image"]: c for c in cg_itms["catalogs"]}["registry.redhat.io/redhat/redhat-operator-index:v4.20"]

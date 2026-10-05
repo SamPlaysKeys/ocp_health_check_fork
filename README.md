@@ -629,10 +629,8 @@ What the check reports:
       "catalog_sources": [{"name": "redhat-operators", "namespace": "openshift-marketplace"}],
       "packages": ["devworkspace-operator", "openshift-cert-manager-operator"],
       "operators": [
-        {"package": "devworkspace-operator", "channel": "fast", "csv": "devworkspace-operator.v0.43.0",
-         "version": "0.43.0", "namespace": "openshift-operators", "subscription": "devworkspace-operator",
-         "installplan_catalog": "redhat-operators",
-         "installplan_catalog_image": "registry.redhat.io/redhat/redhat-operator-index:v4.18"}
+        {"name": "devworkspace-operator", "channel": "fast", "version": "0.43.0",
+         "csv": "devworkspace-operator.v0.43.0"}
       ]
     }
   ],
@@ -643,8 +641,10 @@ What the check reports:
   - `pull_image` is the ref actually pulled: the mirror location when an
     IDMS/ICSP/ITMS entry redirects the image, otherwise `image` itself.
   - `pulled_from` is one of `mirror-host`, `IDMS`, `ICSP`, `ITMS` or `source`.
-  - `csv` is the bundle name in the catalog's `olm.channel` entries, and
-    `version` is that CSV's `spec.version`.
+  - Per operator: `name` is the package name, `channel` the Subscription's
+    channel, `version` the installed CSV's `spec.version`, and `csv` the
+    bundle name in the catalog's `olm.channel` entries. The same
+    package, channel and version installed in several namespaces is listed once.
   - `unresolved_operators` lists Subscriptions whose CatalogSource no longer
     exists, so they have no image to render.
 

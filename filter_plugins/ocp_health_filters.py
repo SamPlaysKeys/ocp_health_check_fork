@@ -1816,10 +1816,11 @@ def catalog_mirror_report(
       image: the CatalogSource(s) using it, pull_image (the ref actually
       pulled - the mirror location when an IDMS/ICSP/ITMS entry redirects
       it, else the image itself), pulled_from, packages (sorted, unique),
-      and per operator: package, channel, csv, version (the CSV's
-      spec.version when `csvs` is given), namespace, subscription and the
-      InstallPlan catalog/image it was installed from. Subscriptions whose
-      catalog can't be resolved to an image go to unresolved_operators.
+      and per operator: name (package name), channel, version (the CSV's
+      spec.version when `csvs` is given) and csv (the bundle name in the
+      catalog's olm.channel entries); the same package+channel+version in
+      several namespaces is one entry. Subscriptions whose catalog can't be
+      resolved to an image go to unresolved_operators.
     - notes: plain-language explanations of what the mirror config means
       for this cluster, for the report.
     - findings (mirrored clusters only): CRITICAL when any default
@@ -1978,14 +1979,10 @@ def catalog_mirror_report(
         sub_cs = cs_by_key.get((sub_source_ns, sub_source))
         sub_image = _get(sub_cs, "spec.image", "") if sub_cs else ""
         op_entry = {
-            "package": _get(sub, "spec.name", ""),
+            "name": _get(sub, "spec.name", ""),
             "channel": _get(sub, "spec.channel", "") or "",
-            "csv": csv,
             "version": csv_version.get((ns, csv), ""),
-            "namespace": ns,
-            "subscription": _get(sub, "metadata.name", ""),
-            "installplan_catalog": ip_cat_name,
-            "installplan_catalog_image": ip_image,
+            "csv": csv,
         }
         if not sub_image:
             unresolved_operators.append(dict(op_entry, catalog_source=sub_source, catalog_source_namespace=sub_source_ns))
@@ -2003,7 +2000,10 @@ def catalog_mirror_report(
             if ref not in cat["catalog_sources"]:
                 cat["catalog_sources"].append(ref)
             cat["default"] = cat["default"] or path["default"]
-            cat["operators"].append(op_entry)
+            # Same package+channel+version installed in several namespaces
+            # is one entry - the catalog lookup is identical.
+            if op_entry not in cat["operators"]:
+                cat["operators"].append(op_entry)
 
         operators.append({
             "package": _get(sub, "spec.name", ""),
@@ -2023,10 +2023,10 @@ def catalog_mirror_report(
     catalogs = []
     for image in sorted(catalogs_by_image):
         cat = catalogs_by_image[image]
-        cat["operators"].sort(key=lambda o: (o["package"], o["namespace"]))
-        cat["packages"] = sorted({o["package"] for o in cat["operators"] if o["package"]})
+        cat["operators"].sort(key=lambda o: (o["name"], o["channel"], o["version"]))
+        cat["packages"] = sorted({o["name"] for o in cat["operators"] if o["name"]})
         catalogs.append(cat)
-    unresolved_operators.sort(key=lambda o: (o["package"], o["namespace"]))
+    unresolved_operators.sort(key=lambda o: (o["name"], o["channel"]))
 
     notes: List[str] = []
     if not mirror_configured:
