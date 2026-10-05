@@ -137,6 +137,11 @@ finalizer_scan_include_crs: true    # the expensive part - one k8s_info list cal
                                      # Namespace/PV/PVC checks.
 finalizer_scan_exclude_crds: []     # CRD names (metadata.name, e.g. "prometheusrules.monitoring.coreos.com")
                                      # to skip from the dynamic scan - noisy or very large CRD types
+finalizer_scan_label_selectors:      # extra label selectors per CRD name, applied server-side to that kind's list
+  # OLM copies every AllNamespaces operator's CSV into every namespace
+  # (label olm.copiedFrom) - tens of thousands of large objects on a big
+  # cluster. Copies are recreated by OLM; only the originals matter here.
+  clusterserviceversions.operators.coreos.com: ["!olm.copiedFrom"]
 finalizer_scan_stuck_after_seconds: 600   # only flag CRITICAL once deletionTimestamp is this old (10 min);
                                            # briefly deleting is normal cluster activity, not a problem
 

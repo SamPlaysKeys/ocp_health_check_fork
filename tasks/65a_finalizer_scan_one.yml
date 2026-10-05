@@ -13,6 +13,7 @@
   kubernetes.core.k8s_info:
     api_version: "{{ _fs_target.group }}/{{ _fs_target.version }}"
     kind: "{{ _fs_target.kind }}"
+    label_selectors: "{{ finalizer_scan_label_selectors[_fs_target.crd_name] | default([]) }}"
   register: _fs_one_raw
   ignore_errors: true
 
