@@ -119,6 +119,17 @@ into an existing ODF `rook-ceph-tools` pod.
     catalog (a missing pod or failed exec becomes a WARNING finding, not a
     failed play). See
     [Catalog opm render notes](#catalog-opm-render-notes) below.
+15. **Catalog mirror (IDMS/ICSP/ITMS) check** (always runs) - any
+    `ImageDigestMirrorSet`, `ImageContentSourcePolicy` or `ImageTagMirrorSet`
+    makes this a mirrored cluster; none makes it a connected cluster, where nothing is flagged. It
+    also reports each mirror entry's `mirrorSourcePolicy` and how each
+    catalog index image is actually pulled. On a
+    mirrored cluster it flags **CRITICAL** if a default OperatorHub
+    CatalogSource (`catalog_default_sources`) is still present, and
+    **CRITICAL** for each operator whose InstallPlan or Subscription is
+    still bound to the old default catalog instead of a mirrored one. Writes `outputs/catalog_mirror_check.json` and
+    report section 14. See
+    [Catalog mirror (IDMS/ICSP/ITMS) notes](#catalog-mirror-idmsicspitms-notes) below.
 
 Every non-OK result becomes a `finding` with a severity
 (`CRITICAL`/`WARNING`/`INFO`); the play fails at the end if any `CRITICAL`
@@ -128,11 +139,22 @@ a CI/pipeline job before it starts the real upgrade.
 ## Requirements
 
 ```bash
+python3 -m venv ~/venv-ocp && source ~/venv-ocp/bin/activate   # Python 3.10+
+pip install -r requirements.txt          # ansible-core>=2.16, kubernetes, websocket-client
 ansible-galaxy collection install -r requirements.yml
-pip install -r requirements.txt --break-system-packages   # kubernetes python client
+ansible --version                        # should show core 2.16+ and the venv's Python
 ```
 
-Needs `ansible-core >= 2.15` and `kubernetes.core >= 3.0`. The account you
+Use **`ansible-core >= 2.16`** (needs **Python 3.10+**), the version current
+`kubernetes.core` releases support. 2.12 is the oldest the playbook accepts;
+2.12 to 2.15 work but print a note. The Python running Ansible also needs
+`kubernetes >= 27.2.0` and `websocket-client >= 1.6.0`. The playbook's first
+tasks check all of this and stop with a clear message otherwise.
+
+Use a virtualenv rather than the OS-packaged `ansible`: an old distro
+Ansible (e.g. 2.10) and its old `kubernetes`/`websocket-client` packages
+make every pod exec (etcd, ODF/Ceph, `opm render`) fail with errors like
+`'NoneType' object has no attribute 'decode'`. The account you
 connect with needs at least `cluster-reader` (read access to nodes,
 clusteroperators, machineconfigpools, machinesets/machines, apirequestcounts,
 and the Portworx/ODF CRs and pods if `portworx_enabled`/`odf_enabled: true`)
@@ -519,6 +541,83 @@ producing nothing). Set `catalog_render_enabled: false` to skip this section
 entirely, or `catalog_render_output_dir` to write somewhere other than
 `cluster_operators_output_dir` (which itself defaults to `outputs/`).
 
+## Catalog mirror (IDMS/ICSP/ITMS) notes
+
+Task 89b (`tasks/89b_catalog_mirror_check.yml`, filter
+`catalog_mirror_report()`). It runs on its own, so `--tags catalog_mirror` works without the other tasks.
+There is no enable flag: skipping this check would let a mirrored cluster
+with leftover default catalogs report as healthy.
+
+**How mirror configuration redirects pulls.** The MCO renders these
+resources into CRI-O's `registries.conf`:
+
+| Resource | Redirects | Falls back to the source registry when the mirror misses? |
+|---|---|---|
+| `ImageDigestMirrorSet` (`config.openshift.io/v1`) | pulls by digest (`@sha256:...`): operator bundles and operands, release payload | Per entry `mirrorSourcePolicy`: `AllowContactingSource` (default) yes, `NeverContactSource` no |
+| `ImageContentSourcePolicy` (`operator.openshift.io/v1alpha1`, deprecated) | pulls by digest | Always (no policy field) |
+| `ImageTagMirrorSet` (`config.openshift.io/v1`) | pulls by tag (`:v4.20`), which is how catalog index images are normally referenced | Per entry `mirrorSourcePolicy`, same as IDMS |
+
+Consequences:
+
+- Mirrors are tried first even if the cluster can still reach the internet,
+  so any IDMS, ICSP or ITMS makes the cluster **mirrored**. With none of them,
+  it is a **connected** cluster.
+- IDMS and ICSP do **not** redirect tag pulls. Without an ITMS, a default
+  catalog such as `redhat-operators` keeps pulling its index straight from
+  `registry.redhat.io`. It then lists every bundle Red Hat publishes,
+  including bundles that were never mirrored.
+- With fallback allowed (`AllowContactingSource` or ICSP), an operator
+  installed from such a bundle works today through the internet and breaks
+  once the cluster is disconnected. With `NeverContactSource`, it fails
+  immediately with `ImagePullBackOff`.
+
+What the check reports:
+
+- **Mirror sets**: every IDMS, ICSP and ITMS entry, with its source, mirrors and
+  effective `mirrorSourcePolicy`. Each mirror location's registry host
+  (e.g. `mirror.local:5000`) is a *mirror host*.
+- **Catalog index pull paths**: for each CatalogSource, whether its image
+  already points at a mirror host, is redirected by an IDMS/ICSP (digest
+  ref) or ITMS (tag ref) entry (with that entry's policy), or is pulled
+  straight from the **source registry**. Sources match on a path prefix
+  (`registry.redhat.io/redhat` covers `registry.redhat.io/redhat/...`) or a
+  `*.example.com` wildcard host.
+- **Notes**: plain-language explanations of the above for this cluster, shown in report section 14.
+- **INFO findings**: digest mirrors that fall back to the source, so an image
+  missing from the mirror is pulled from the internet without notice (set
+  `NeverContactSource` to prove the mirror is complete). Also any
+  deprecated ICSP still in use (`oc adm migrate icsp` converts it to IDMS/ITMS).
+- **Default sources**: each name in `catalog_default_sources` is
+  checked for a live CatalogSource in `openshift-marketplace`, and
+  `OperatorHub/cluster` is read to see whether it is disabled
+  (`spec.disableAllDefaultSources` or a per-source `disabled: true`). With a
+  mirror configured, any default CatalogSource that still exists is
+  **CRITICAL**.
+- **InstallPlan catalog**: for each Subscription, the check follows
+  `status.installPlanRef` and reads the catalog that resolved the installed
+  CSV from `status.bundleLookups[].catalogSourceRef`. When that is missing,
+  it falls back to the InstallPlan's legacy `spec.catalogSource`. The catalog is
+  classified as one of:
+  - `mirrored` - the CatalogSource index is pulled from the mirror (it is on a mirror host,
+    or an IDMS/ICSP/ITMS entry covers it). **OK**.
+  - `default` - one of the default sources, even when an ITMS redirects
+    its index. **CRITICAL**: re-point the
+    Subscription to the mirrored CatalogSource. If the Subscription
+    already points to the mirror, the message notes that the next update
+    will resolve from it.
+  - `missing` - the CatalogSource no longer exists. **CRITICAL**.
+  - `other` - a custom catalog pulled from its own registry. **INFO**.
+  - `unknown` - no InstallPlan or catalog was found. **INFO**.
+
+  If the Subscription itself points to a default or missing source, it is
+  also flagged **CRITICAL**.
+
+  These cases are CRITICAL because they block the upgrade. OLM resolves
+  those operators' updates from a catalog outside the mirror, so the bundles it
+  picks may not be mirrored.
+- On a connected cluster (no IDMS, ICSP or ITMS), the tables are still built but
+  nothing is flagged, because default catalogs are expected there.
+
 ## OpenShift Virtualization notes
 
 The VM node-drain-readiness matrix (section 11 of the report) is built entirely
@@ -733,12 +832,16 @@ tasks/40_machineconfigpools.yml
 tasks/50_machinesets.yml
 tasks/60_deprecated_apis.yml
 tasks/65_stuck_finalizers.yml
+tasks/65a_finalizer_scan_one.yml     included per CRD kind from 65 (keeps only objects being deleted)
 tasks/70_portworx.yml
 tasks/80_openshift_virtualization.yml
 tasks/85_acm.yml                   ACM hub health, managed-cluster inventory, cascade
 tasks/85a_acm_wait_msa_secret.yml    included per-cluster from 85_acm.yml
 tasks/87_odf.yml                   OpenShift Data Foundation (ODF) + Ceph/OSD checks
 tasks/88_cluster_operators_installed.yml   writes outputs/cluster_operators_installed.json + .md
+tasks/89_catalog_opm_render.yml    per-catalog opm render -> outputs/<catalog>_<tag>.json
+tasks/89a_catalog_opm_render_one.yml included per catalog from 89
+tasks/89b_catalog_mirror_check.yml IDMS/ICSP/ITMS vs default catalogs and InstallPlans -> outputs/catalog_mirror_check.json
 tasks/90_render_report.yml         renders templates, fails on CRITICAL
 filter_plugins/ocp_health_filters.py   all the report-building logic (unit tested)
 templates/report.md.j2 / report.html.j2 / report_summary.html.j2

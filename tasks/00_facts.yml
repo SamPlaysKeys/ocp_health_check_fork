@@ -1,4 +1,52 @@
 ---
+# Runs first so an unsupported toolchain fails here with a clear message,
+# instead of later as obscure k8s_exec errors (e.g. "'NoneType' object has
+# no attribute 'decode'" when an OS-packaged Ansible 2.10 brings an old
+# kubernetes/websocket-client). ansible-core 2.12 is the oldest verified to
+# work; 2.16+ is what current kubernetes.core releases officially support.
+- name: Require ansible-core >= 2.12
+  ansible.builtin.assert:
+    that:
+      - ansible_version.full is version('2.12', '>=')
+    fail_msg: >-
+      This playbook needs ansible-core >= 2.12 (2.16+ recommended), but is running under Ansible
+      {{ ansible_version.full }} ({{ ansible_playbook_python }}). Install the requirements into a virtualenv:
+      python3 -m venv ~/venv-ocp && source ~/venv-ocp/bin/activate && pip install -r requirements.txt &&
+      ansible-galaxy collection install -r requirements.yml (Python 3.10+). See README "Requirements".
+    quiet: true
+
+- name: Note when ansible-core is older than kubernetes.core officially supports
+  ansible.builtin.debug:
+    msg: >-
+      ansible-core {{ ansible_version.full }} works but is older than the 2.16 that current kubernetes.core
+      releases officially support - upgrade with pip install -r requirements.txt when convenient.
+  when: ansible_version.full is version('2.16', '<')
+
+- name: Read the kubernetes and websocket-client versions the k8s modules will use
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - -c
+      - "import kubernetes, websocket; print(kubernetes.__version__); print(websocket.__version__)"
+  register: _py_k8s_libs
+  changed_when: false
+  failed_when: false
+
+- name: Require kubernetes >= 27.2.0 and websocket-client >= 1.6.0 (pod exec breaks on older ones)
+  ansible.builtin.assert:
+    that:
+      - _py_k8s_libs.rc == 0
+      - _py_k8s_libs.stdout_lines[0] is version('27.2.0', '>=')
+      - _py_k8s_libs.stdout_lines[1] is version('1.6.0', '>=')
+    fail_msg: >-
+      {{ ansible_playbook_python }} has
+      {{ ('kubernetes ' ~ _py_k8s_libs.stdout_lines[0] ~ ', websocket-client ' ~ _py_k8s_libs.stdout_lines[1])
+         if (_py_k8s_libs.rc == 0 and _py_k8s_libs.stdout_lines | length > 1)
+         else ('no usable kubernetes/websocket-client: ' ~ (_py_k8s_libs.stderr | default('') | trim)) }}
+      - need kubernetes >= 27.2.0 and websocket-client >= 1.6.0, or every pod exec (etcd, ODF/Ceph,
+      opm render) fails. Run pip install -r requirements.txt in the virtualenv Ansible runs from.
+    quiet: true
+
 - name: Validate auth method and required variables
   ansible.builtin.assert:
     that:

@@ -11,8 +11,9 @@
 #   *.summary.html  - compact HTML fragment/widget suitable for embedding
 #
 # Usage:
+#   python3 -m venv ~/venv-ocp && source ~/venv-ocp/bin/activate   # Python 3.10+
+#   pip install -r requirements.txt          # ansible-core>=2.16, kubernetes client
 #   ansible-galaxy collection install -r requirements.yml
-#   pip install -r requirements.txt --break-system-packages
 #   ansible-playbook playbook.yml \
 #     -e ocp_auth_method=token -e ocp_api_host=https://api.mycluster:6443 \
 #     -e ocp_api_token="$(oc whoami -t)" -e upgrade_target_version=4.17.14
@@ -85,6 +86,10 @@
     - name: 89 - Per-catalog opm render (outputs/<catalog>_<tag>.json)
       ansible.builtin.include_tasks: tasks/89_catalog_opm_render.yml
       tags: [cluster_operators, olm, opm_render]
+
+    - name: 89b - Catalog mirror (IDMS/ICSP/ITMS) check - default sources disabled, InstallPlans from mirrored catalogs
+      ansible.builtin.include_tasks: tasks/89b_catalog_mirror_check.yml
+      tags: [cluster_operators, olm, catalog_mirror]
 
     - name: 90 - Render reports and evaluate overall readiness
       ansible.builtin.include_tasks: tasks/90_render_report.yml

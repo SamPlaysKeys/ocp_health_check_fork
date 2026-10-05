@@ -11,3 +11,4 @@ __pycache__/
 *.pyc
 .ansible/
 *.retry
+.python-version

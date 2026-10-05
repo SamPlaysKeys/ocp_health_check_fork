@@ -653,11 +653,23 @@ def crd_scan_targets(crds: List[dict], exclude_names: Optional[List[str]] = None
     return targets
 
 
+def _ns_excluded(ns: str, patterns: Optional[List[str]]) -> bool:
+    """True when namespace `ns` matches an exact name or a trailing-'*'
+    prefix pattern (e.g. "openshift-*") in `patterns`."""
+    for pat in patterns or []:
+        if pat.endswith("*") and ns.startswith(pat[:-1]):
+            return True
+        if pat == ns:
+            return True
+    return False
+
+
 def finalizer_stuck_report(
     fixed_resources: Dict[str, List[dict]],
     crd_scan_results: List[dict],
     now_iso: str,
     stuck_after_seconds: int = 600,
+    exclude_namespaces: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Flag any object with both a deletionTimestamp AND finalizers set - i.e.
     deletion was requested but something (a controller/webhook that no longer
@@ -666,15 +678,27 @@ def finalizer_stuck_report(
     built-in kinds we always check (Namespace/PersistentVolume/
     PersistentVolumeClaim); `crd_scan_results` is the raw registered result of
     looping kubernetes.core.k8s_info over crd_scan_targets() (each entry has
-    `.item` = the target dict and `.resources`/`.failed` from the module)."""
+    `.item` = the target dict and `.resources`/`.failed` from the module).
+
+    `exclude_namespaces` (exact names or trailing-'*' patterns, e.g.
+    "openshift-*") skips namespaced objects in those namespaces and the
+    matching Namespace objects themselves; cluster-scoped objects (PVs,
+    cluster-scoped CRs) are always checked. `excluded` counts objects that
+    would have been reported but were skipped this way."""
     now = _parse_ts(now_iso)
     rows: List[dict] = []
+    excluded_count = 0
 
     def process(kind: str, crd_name: str, items: List[dict]):
+        nonlocal excluded_count
         for obj in items or []:
             deletion_ts = _get(obj, "metadata.deletionTimestamp")
             finalizers = _get(obj, "metadata.finalizers", []) or []
             if not deletion_ts or not finalizers:
+                continue
+            ns = _get(obj, "metadata.namespace", "") or (_get(obj, "metadata.name", "") if kind == "Namespace" else "")
+            if ns and _ns_excluded(ns, exclude_namespaces):
+                excluded_count += 1
                 continue
             dt = _parse_ts(deletion_ts)
             age_seconds = (now - dt).total_seconds() if (dt and now) else None
@@ -712,6 +736,8 @@ def finalizer_stuck_report(
         "rows": rows,
         "crds_scanned": len(crd_scan_results or []),
         "crds_failed": crds_failed,
+        "excluded_namespaces": list(exclude_namespaces or []),
+        "excluded": excluded_count,
     }
 
 
@@ -735,12 +761,7 @@ def deprecated_api_report(
     target_tuple = _k8s_minor_tuple(target_k8s_minor) if target_k8s_minor else None
 
     def excluded(ns: str) -> bool:
-        for pat in exclude_namespaces:
-            if pat.endswith("*") and ns.startswith(pat[:-1]):
-                return True
-            if pat == ns:
-                return True
-        return False
+        return _ns_excluded(ns, exclude_namespaces)
 
     by_namespace: Dict[str, Dict[str, dict]] = {}
     cluster_summary: Dict[str, dict] = {}
@@ -1676,6 +1697,345 @@ def opm_render_filter(raw_stdout: Any, packages: List[str]) -> List[dict]:
 
 
 # ----------------------------------------------------------------------------
+# 13b. Catalog mirror (IDMS/ICSP/ITMS) check
+# ----------------------------------------------------------------------------
+# How OpenShift mirror configuration actually redirects pulls (CRI-O's
+# registries.conf, rendered by the MCO from these CRs):
+#   - ImageDigestMirrorSet (IDMS) and its deprecated predecessor
+#     ImageContentSourcePolicy (ICSP) only redirect pulls BY DIGEST
+#     (image@sha256:...) - operator bundle/operand images and release
+#     payloads.
+#   - ImageTagMirrorSet (ITMS) redirects pulls BY TAG (image:v4.20). Catalog
+#     index images are normally referenced by tag, so without an ITMS
+#     covering it a default CatalogSource like redhat-operators keeps
+#     pulling its index straight from registry.redhat.io - even on a
+#     cluster that has an IDMS.
+#   - mirrorSourcePolicy (IDMS/ITMS only, per entry): AllowContactingSource
+#     (the default) tries the mirrors first and FALLS BACK to the source
+#     registry when the mirror misses; NeverContactSource never falls back,
+#     so an image missing from the mirror fails to pull. ICSP has no such
+#     field and always falls back.
+# So with any IDMS/ICSP/ITMS the cluster is treated as mirrored even if it
+# can still reach the internet: a default catalog next to the mirror lets
+# OLM pick bundles that were never mirrored, which today only work through
+# the fallback and break once the cluster is disconnected (or immediately
+# with NeverContactSource). See tasks/89b_catalog_mirror_check.yml.
+
+DEFAULT_CATALOG_SOURCES = ["redhat-operators", "certified-operators", "community-operators", "redhat-marketplace"]
+
+
+def _image_host(image: Any) -> str:
+    """Registry host[:port] of an image ref or mirror location - the first
+    path segment, but only when it looks like a host (has a '.' or ':', or
+    is 'localhost'); a bare 'repo/name' has no explicit registry."""
+    first, sep, _ = str(image or "").partition("/")
+    if sep and ("." in first or ":" in first or first == "localhost"):
+        return first.lower()
+    return ""
+
+
+def _split_image_ref(image: Any) -> tuple:
+    """('registry/repo/name', 'digest'|'tag') for an image ref. A ref with no
+    tag or digest is pulled as :latest, so it counts as 'tag'."""
+    text = str(image or "")
+    if "@" in text:
+        return text.split("@", 1)[0], "digest"
+    head, sep, last = text.rpartition("/")
+    if ":" in last:
+        last = last.split(":", 1)[0]
+    return (head + sep + last), "tag"
+
+
+def _mirror_source_covers(source: str, repo: str) -> bool:
+    """True when a mirror-set `source` applies to `repo`: an exact match, a
+    path prefix ending on a '/' boundary, or a '*.example.com' wildcard
+    matching the repo's host (IDMS/ITMS allow wildcard hosts)."""
+    source = str(source or "").rstrip("/")
+    if not source or not repo:
+        return False
+    if source.startswith("*."):
+        host = _image_host(repo) or repo.split("/", 1)[0]
+        return host.endswith(source[1:])
+    return repo == source or repo.startswith(source + "/")
+
+
+def catalog_mirror_report(
+    idms: List[dict],
+    icsp: List[dict],
+    operatorhub: List[dict],
+    catalogsources: List[dict],
+    subscriptions: List[dict],
+    installplans: List[dict],
+    default_sources: Optional[List[str]] = None,
+    marketplace_namespace: str = "openshift-marketplace",
+    itms: Optional[List[dict]] = None,
+) -> Dict[str, Any]:
+    """Cross-check mirror configuration against OLM catalog usage.
+
+    - mirror_configured: any ImageDigestMirrorSet, ImageContentSourcePolicy
+      or ImageTagMirrorSet exists - each redirects pulls to the mirror, so
+      any one makes this a mirrored cluster even if it can still reach the
+      internet; none means a connected cluster. mirror_sets lists every
+      entry (source, mirrors, mirrorSourcePolicy - ICSP always
+      'AllowContactingSource'); mirror_hosts are the registry hosts of every
+      mirror location.
+    - pull_policy: digest_mirroring/tag_mirroring (any IDMS/ICSP resp. ITMS
+      entry), and per kind whether any entry falls back to the source
+      (AllowContactingSource) or all are NeverContactSource.
+    - catalog_pull_paths: per CatalogSource, how its index image is really
+      pulled - 'mirror-host' (image already points at a mirror host),
+      'IDMS'/'ICSP'/'ITMS' (redirected by that mirror set, with its policy)
+      or 'source' (not redirected: pulled straight from its own registry).
+    - default_sources: one row per default OperatorHub source - present
+      (CatalogSource still exists in marketplace_namespace) and disabled
+      (OperatorHub/cluster spec.disableAllDefaultSources or a per-source
+      `disabled: true`).
+    - operators: one row per Subscription. The catalog that installed the
+      current CSV is read from the InstallPlan the Subscription references
+      (status.installPlanRef): the bundleLookups entry for that CSV, else
+      any bundleLookup, else the legacy spec.catalogSource. Each catalog is
+      classified 'mirrored' (pulled from the mirror - see catalog_pull_paths),
+      'default' (a default OperatorHub source), 'missing' (CatalogSource no
+      longer exists), 'other' (custom catalog pulled from its own registry)
+      or 'unknown' (no InstallPlan/catalog found).
+    - notes: plain-language explanations of what the mirror config means
+      for this cluster, for the report.
+    - findings (mirrored clusters only): CRITICAL when any default
+      CatalogSource is still present, and per operator whose Subscription
+      or InstallPlan is bound to a default/missing catalog - OLM resolves
+      its updates outside the mirror, which blocks the upgrade. INFO for
+      'other'/'unknown' operators, for digest/tag mirrors that fall back to
+      the source registry, and for any (deprecated) ICSP still in use.
+    Never raises."""
+    defaults = list(default_sources if default_sources is not None else DEFAULT_CATALOG_SOURCES)
+
+    mirror_sets: List[dict] = []
+    for kind, items, list_key in (
+        ("ImageDigestMirrorSet", idms, "imageDigestMirrors"),
+        ("ImageContentSourcePolicy", icsp, "repositoryDigestMirrors"),
+        ("ImageTagMirrorSet", itms, "imageTagMirrors"),
+    ):
+        for item in items or []:
+            entries = []
+            for entry in _get(item, "spec." + list_key, []) or []:
+                if not isinstance(entry, dict):
+                    continue
+                entries.append({
+                    "source": str(entry.get("source", "")),
+                    "mirrors": [str(m) for m in entry.get("mirrors", []) or [] if m],
+                    # ICSP has no mirrorSourcePolicy and always falls back.
+                    "policy": "AllowContactingSource" if kind == "ImageContentSourcePolicy"
+                    else (entry.get("mirrorSourcePolicy") or "AllowContactingSource"),
+                })
+            mirror_sets.append({
+                "kind": kind,
+                "short": {"ImageDigestMirrorSet": "IDMS", "ImageContentSourcePolicy": "ICSP", "ImageTagMirrorSet": "ITMS"}[kind],
+                "name": _get(item, "metadata.name", ""),
+                "entries": entries,
+            })
+    mirror_hosts = sorted({h for ms in mirror_sets for e in ms["entries"] for h in (_image_host(m) for m in e["mirrors"]) if h})
+    mirror_configured = len(mirror_sets) > 0
+
+    def entries_of(*shorts):
+        return [(ms, e) for ms in mirror_sets if ms["short"] in shorts for e in ms["entries"]]
+
+    digest_entries = entries_of("IDMS", "ICSP")
+    tag_entries = entries_of("ITMS")
+    pull_policy = {
+        "digest_mirroring": bool(digest_entries),
+        "digest_fallback": [f"{ms['short']}/{ms['name']} {e['source']}" for ms, e in digest_entries if e["policy"] != "NeverContactSource"],
+        "digest_never_contact": [f"{ms['short']}/{ms['name']} {e['source']}" for ms, e in digest_entries if e["policy"] == "NeverContactSource"],
+        "tag_mirroring": bool(tag_entries),
+        "tag_fallback": [f"ITMS/{ms['name']} {e['source']}" for ms, e in tag_entries if e["policy"] != "NeverContactSource"],
+        "tag_never_contact": [f"ITMS/{ms['name']} {e['source']}" for ms, e in tag_entries if e["policy"] == "NeverContactSource"],
+    }
+
+    def pull_path(image: str) -> Dict[str, Any]:
+        """How this image is really pulled, given the mirror sets."""
+        repo, ref_type = _split_image_ref(image)
+        if mirror_hosts and _image_host(image) in mirror_hosts:
+            return {"ref_type": ref_type, "path": "mirror-host", "via": "", "policy": ""}
+        for ms, e in (digest_entries if ref_type == "digest" else tag_entries):
+            if e["mirrors"] and _mirror_source_covers(e["source"], repo):
+                return {"ref_type": ref_type, "path": ms["short"], "via": f"{ms['short']}/{ms['name']}", "policy": e["policy"]}
+        return {"ref_type": ref_type, "path": "source", "via": "", "policy": ""}
+
+    hub = next((h for h in operatorhub or [] if _get(h, "metadata.name") == "cluster"), {})
+    disable_all = bool(_get(hub, "spec.disableAllDefaultSources", False))
+    hub_disabled = {s.get("name"): bool(s.get("disabled")) for s in (_get(hub, "spec.sources", []) or []) if isinstance(s, dict)}
+
+    cs_by_key: Dict[tuple, dict] = {}
+    catalog_pull_paths = []
+    for cs in catalogsources or []:
+        ns, name, image = _get(cs, "metadata.namespace", ""), _get(cs, "metadata.name", ""), _get(cs, "spec.image", "")
+        cs_by_key[(ns, name)] = cs
+        row = {"name": name, "namespace": ns, "image": image,
+               "default": ns == marketplace_namespace and name in defaults}
+        row.update(pull_path(image))
+        catalog_pull_paths.append(row)
+    catalog_pull_paths.sort(key=lambda r: (not r["default"], r["namespace"], r["name"]))
+    path_by_key = {(r["namespace"], r["name"]): r for r in catalog_pull_paths}
+
+    default_rows = []
+    for name in defaults:
+        cs = cs_by_key.get((marketplace_namespace, name))
+        default_rows.append({
+            "name": name,
+            "present": cs is not None,
+            "disabled": disable_all or hub_disabled.get(name, False),
+            "image": _get(cs, "spec.image", "") if cs else "",
+        })
+    defaults_present = [d["name"] for d in default_rows if d["present"]]
+
+    def classify(ns: str, name: str) -> tuple:
+        if not name:
+            return "unknown", ""
+        cs = cs_by_key.get((ns, name))
+        image = _get(cs, "spec.image", "") if cs else ""
+        if ns == marketplace_namespace and name in defaults:
+            return "default", image
+        if cs is None:
+            return "missing", ""
+        if path_by_key[(ns, name)]["path"] != "source":
+            return "mirrored", image
+        return "other", image
+
+    # What happens to a bundle that was never mirrored - the consequence an
+    # old-catalog InstallPlan actually runs into.
+    if pull_policy["digest_mirroring"] and not pull_policy["digest_fallback"]:
+        unmirrored_bundle = "with NeverContactSource on every digest mirror, a bundle missing from the mirror fails to pull (ImagePullBackOff)"
+    else:
+        unmirrored_bundle = "a bundle missing from the mirror only pulls through the fallback to the source registry, and fails once the cluster is disconnected"
+
+    ip_by_key = {(_get(ip, "metadata.namespace", ""), _get(ip, "metadata.name", "")): ip for ip in installplans or []}
+
+    operators = []
+    for sub in subscriptions or []:
+        ns = _get(sub, "metadata.namespace", "")
+        csv = _get(sub, "status.installedCSV") or _get(sub, "status.currentCSV") or ""
+        sub_source = _get(sub, "spec.source", "")
+        sub_source_ns = _get(sub, "spec.sourceNamespace") or ns
+        sub_kind, _ = classify(sub_source_ns, sub_source)
+
+        ip_ref = _get(sub, "status.installPlanRef") or {}
+        ip_name = ip_ref.get("name") or _get(sub, "status.installplan.name", "")
+        ip = ip_by_key.get((ip_ref.get("namespace") or ns, ip_name)) if ip_name else None
+        ip_cat_name, ip_cat_ns = "", ""
+        if ip:
+            lookups = _get(ip, "status.bundleLookups", []) or []
+            match = [b for b in lookups if b.get("identifier") == csv] or lookups
+            ref = (match[0].get("catalogSourceRef") or {}) if match else {}
+            ip_cat_name = ref.get("name") or _get(ip, "spec.catalogSource", "")
+            ip_cat_ns = ref.get("namespace") or _get(ip, "spec.catalogSourceNamespace") or ns
+        ip_kind, ip_image = classify(ip_cat_ns, ip_cat_name)
+
+        severity, message = "OK", ""
+        if mirror_configured:
+            if ip_kind in ("default", "missing") or sub_kind in ("default", "missing"):
+                severity = "CRITICAL"
+                if ip_kind in ("default", "missing") and sub_kind == "mirrored":
+                    message = (f"installed from {ip_kind} catalog {ip_cat_name} (InstallPlan {ip_name}); Subscription already "
+                               f"points to mirrored catalog {sub_source} - the next update resolves from the mirror")
+                elif ip_kind in ("default", "missing"):
+                    message = (f"installed from {ip_kind} catalog {ip_cat_name} (InstallPlan {ip_name}) and Subscription still "
+                               f"points to {sub_source} - re-point it to the mirrored CatalogSource; {unmirrored_bundle}")
+                else:
+                    message = (f"Subscription points to {sub_kind} catalog {sub_source} - re-point it to the mirrored CatalogSource; "
+                               f"{unmirrored_bundle}")
+            elif ip_kind in ("other", "unknown"):
+                severity = "INFO"
+                message = (f"no InstallPlan catalog found for {csv or 'this Subscription'}" if ip_kind == "unknown"
+                           else f"installed from catalog {ip_cat_name} whose image {ip_image} is not pulled from the mirror "
+                                f"(not on a mirror host, and no IDMS/ICSP/ITMS entry covers it)")
+
+        operators.append({
+            "package": _get(sub, "spec.name", ""),
+            "namespace": ns,
+            "csv": csv,
+            "subscription_source": sub_source,
+            "subscription_source_kind": sub_kind,
+            "installplan": ip_name,
+            "installplan_catalog": ip_cat_name,
+            "installplan_catalog_kind": ip_kind,
+            "installplan_catalog_image": ip_image,
+            "severity": severity,
+            "message": message,
+        })
+    operators.sort(key=lambda o: (-_severity_rank(o["severity"]), o["namespace"], o["package"]))
+
+    notes: List[str] = []
+    if not mirror_configured:
+        notes.append("Connected cluster: no ImageDigestMirrorSet, ImageContentSourcePolicy or ImageTagMirrorSet, "
+                     "so every image is pulled from its own registry and the default catalogs are expected.")
+    else:
+        notes.append("Mirrored cluster: any IDMS/ICSP/ITMS makes CRI-O try the mirror first, even when the cluster can "
+                     "still reach the internet, so operators must come from mirrored catalogs.")
+        if pull_policy["digest_mirroring"]:
+            if pull_policy["digest_fallback"]:
+                notes.append("Digest pulls (operator bundles and operands, release payload) fall back to the source registry when "
+                             "the mirror misses (AllowContactingSource, and always for ICSP): "
+                             + "; ".join(pull_policy["digest_fallback"])
+                             + ". An image that was never mirrored still works today and breaks once the cluster is disconnected.")
+            if pull_policy["digest_never_contact"]:
+                notes.append("Digest pulls never contact the source (NeverContactSource): "
+                             + "; ".join(pull_policy["digest_never_contact"])
+                             + ". Any image missing from the mirror fails to pull.")
+        else:
+            notes.append("No IDMS/ICSP: digest pulls (operator bundles, release payload) are not redirected to the mirror.")
+        if pull_policy["tag_mirroring"]:
+            notes.append("Tag pulls are redirected by ITMS: " + "; ".join(pull_policy["tag_fallback"] + pull_policy["tag_never_contact"])
+                         + ("." if not pull_policy["tag_never_contact"] else " (NeverContactSource entries never fall back)."))
+        else:
+            notes.append("No ImageTagMirrorSet: images referenced by tag - which is how catalog index images are normally "
+                         "referenced - are NOT redirected. IDMS/ICSP only apply to digest pulls.")
+        for r in catalog_pull_paths:
+            if r["default"] and r["path"] == "source":
+                notes.append(f"Default catalog {r['name']} ({r['image']}) is pulled straight from {_image_host(r['image']) or 'its registry'} "
+                             f"(by {r['ref_type']}, no mirror set covers it), so it lists bundles that may never have been mirrored.")
+        if any(ms["short"] == "ICSP" for ms in mirror_sets):
+            notes.append("ImageContentSourcePolicy is deprecated: convert it with `oc adm migrate icsp` to IDMS/ITMS, which also "
+                         "support mirrorSourcePolicy.")
+
+    findings = []
+    if mirror_configured and defaults_present:
+        direct = [r["name"] for r in catalog_pull_paths if r["default"] and r["path"] == "source"]
+        findings.append({
+            "severity": "CRITICAL",
+            "summary": (f"image mirroring is configured ({', '.join(ms['short'] + '/' + ms['name'] for ms in mirror_sets)}) but default "
+                        f"CatalogSource(s) {', '.join(defaults_present)} are still present in {marketplace_namespace}"
+                        f"{' (OperatorHub disableAllDefaultSources=true but they still exist)' if disable_all else ''}"
+                        f"{'; ' + ', '.join(direct) + ' index pulled straight from the source registry (no ITMS covers it)' if direct else ''}"
+                        f" - OLM can resolve bundles that were never mirrored ({unmirrored_bundle}). Disable them via "
+                        "OperatorHub/cluster spec.disableAllDefaultSources so OLM only resolves from mirrored catalogs."),
+        })
+    for op in operators:
+        if op["severity"] != "OK":
+            findings.append({"severity": op["severity"], "summary": f"{op['package']} ({op['namespace']}): {op['message']}"})
+    if mirror_configured and pull_policy["digest_fallback"]:
+        findings.append({"severity": "INFO", "summary": (
+            "digest mirrors fall back to the source registry (AllowContactingSource/ICSP): " + "; ".join(pull_policy["digest_fallback"])
+            + " - an image missing from the mirror is pulled from the internet without notice; set mirrorSourcePolicy: "
+            "NeverContactSource on the IDMS to prove the mirror is complete.")})
+    if any(ms["short"] == "ICSP" for ms in mirror_sets):
+        findings.append({"severity": "INFO", "summary": (
+            "deprecated ImageContentSourcePolicy in use (" + ", ".join(ms["name"] for ms in mirror_sets if ms["short"] == "ICSP")
+            + ") - migrate with `oc adm migrate icsp` to ImageDigestMirrorSet/ImageTagMirrorSet.")})
+
+    return {
+        "mirror_configured": mirror_configured,
+        "mirror_sets": mirror_sets,
+        "mirror_hosts": mirror_hosts,
+        "pull_policy": pull_policy,
+        "catalog_pull_paths": catalog_pull_paths,
+        "disable_all_default_sources": disable_all,
+        "default_sources": default_rows,
+        "operators": operators,
+        "notes": notes,
+        "findings": findings,
+    }
+
+
+# ----------------------------------------------------------------------------
 # 14. Markdown table cell escaping
 # ----------------------------------------------------------------------------
 def md_cell(value: Any) -> str:
@@ -1710,5 +2070,6 @@ class FilterModule(object):
             "opm_source_path": opm_source_path,
             "catalog_render_filename": catalog_render_filename,
             "opm_render_filter": opm_render_filter,
+            "catalog_mirror_report": catalog_mirror_report,
             "md_cell": md_cell,
         }

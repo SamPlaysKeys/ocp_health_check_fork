@@ -48,10 +48,16 @@
       register: _cosnap_subscriptions_raw
       ignore_errors: true
 
-    - name: Discover ClusterServiceVersions (all namespaces)
+    # Originals only: OLM copies an AllNamespaces operator's CSV into every
+    # namespace (label olm.copiedFrom), which can be tens of thousands of
+    # large objects. The original sits in the Subscription's namespace,
+    # which is the only one cluster_operators_snapshot() looks up.
+    - name: Discover ClusterServiceVersions (all namespaces, excluding OLM's per-namespace copies)
       kubernetes.core.k8s_info:
         api_version: operators.coreos.com/v1alpha1
         kind: ClusterServiceVersion
+        label_selectors:
+          - "!olm.copiedFrom"
       register: _cosnap_csvs_raw
       ignore_errors: true
 

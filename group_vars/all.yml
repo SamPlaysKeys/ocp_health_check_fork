@@ -137,6 +137,15 @@ finalizer_scan_include_crs: true    # the expensive part - one k8s_info list cal
                                      # Namespace/PV/PVC checks.
 finalizer_scan_exclude_crds: []     # CRD names (metadata.name, e.g. "prometheusrules.monitoring.coreos.com")
                                      # to skip from the dynamic scan - noisy or very large CRD types
+finalizer_scan_exclude_namespaces:   # skip objects in these namespaces (and the Namespaces themselves);
+  - openshift                        # exact names or trailing-'*' prefixes. Cluster-scoped objects are
+  - openshift-*                      # always checked. Set [] to include platform namespaces (e.g. to
+                                     # catch a stuck ODF PVC in openshift-storage).
+finalizer_scan_label_selectors:      # extra label selectors per CRD name, applied server-side to that kind's list
+  # OLM copies every AllNamespaces operator's CSV into every namespace
+  # (label olm.copiedFrom) - tens of thousands of large objects on a big
+  # cluster. Copies are recreated by OLM; only the originals matter here.
+  clusterserviceversions.operators.coreos.com: ["!olm.copiedFrom"]
 finalizer_scan_stuck_after_seconds: 600   # only flag CRITICAL once deletionTimestamp is this old (10 min);
                                            # briefly deleting is normal cluster activity, not a problem
 
@@ -278,6 +287,23 @@ cluster_operators_output_dir: "{{ playbook_dir }}/outputs"
 # see the README's requirements section.
 catalog_render_enabled: true
 catalog_render_output_dir: "{{ cluster_operators_output_dir }}"
+
+# Catalog mirror (IDMS/ICSP/ITMS) check (task 89b, tasks/89b_catalog_mirror_check.yml).
+# Always runs - there is no enable flag, since skipping it would let a
+# mirrored cluster report as healthy. Any ImageDigestMirrorSet,
+# ImageContentSourcePolicy or ImageTagMirrorSet = mirrored cluster; none =
+# connected cluster (nothing flagged). Each mirror entry's
+# mirrorSourcePolicy (fallback to source or not) and each catalog index's
+# real pull path are reported too. On a mirrored cluster: CRITICAL if a default
+# CatalogSource below is still present in openshift-marketplace, and
+# CRITICAL per operator whose InstallPlan/Subscription is still bound to a
+# default (or deleted) catalog instead of a mirrored one.
+# Also writes <catalog_render_output_dir>/catalog_mirror_check.json.
+catalog_default_sources:
+  - redhat-operators
+  - certified-operators
+  - community-operators
+  - redhat-marketplace
 
 # -----------------------------------------------------------------------------
 # 11. Report / behavior

@@ -30,6 +30,7 @@ finalizer_stuck_data = f.finalizer_stuck_report(
     fx.CRD_SCAN_RESULTS,
     fx.NOW_ISO,
     600,
+    ["openshift", "openshift-*"],
 )
 # Mixed-severity scenario (slow/down endpoint, db near quota, active alarm) so the
 # preview exercises every severity color in all three etcd tables at once.
@@ -212,6 +213,13 @@ context = dict(
     ],
 )
 
+catalog_mirror_data = f.catalog_mirror_report(
+    fx.MIRROR_IDMS, [], fx.MIRROR_OPERATORHUB_DEFAULTS_ON, fx.MIRROR_CATALOGSOURCES,
+    fx.MIRROR_SUBSCRIPTIONS, fx.MIRROR_INSTALLPLANS,
+)
+for row in catalog_mirror_data["findings"]:
+    findings.append({"section": "Catalog mirror (IDMS/ICSP/ITMS)", "severity": row["severity"], "summary": row["summary"]})
+
 cluster_operators_snapshot_data = f.cluster_operators_snapshot(
     fx.COSNAP_SUBSCRIPTIONS, fx.COSNAP_CSVS, fx.COSNAP_CATALOGSOURCES, "4.18.14", "4.20.32", "eus-4.20",
 )
@@ -225,6 +233,7 @@ context.update(
     info_findings=info_findings,
     overall_status="CRITICAL" if critical_findings else ("WARNING" if warning_findings else "OK"),
     cluster_operators_snapshot_data=cluster_operators_snapshot_data,
+    catalog_mirror_data=catalog_mirror_data,
 )
 
 env = jinja2.Environment(
