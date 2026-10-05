@@ -616,8 +616,8 @@ What the check reports:
   those operators' updates from a catalog outside the mirror, so the bundles it
   picks may not be mirrored.
 - **`catalogs` in `outputs/catalog_mirror_check.json`**: installed operators
-  grouped by the catalog image their Subscription resolves updates from, so
-  another tool can run `opm render` once per image for all its operators:
+  grouped by catalog image, so another tool can run `opm render` once per
+  image for all its operators:
 
   ```json
   "catalogs": [
@@ -627,10 +627,9 @@ What the check reports:
       "pulled_from": "source",
       "default": true,
       "catalog_sources": [{"name": "redhat-operators", "namespace": "openshift-marketplace"}],
-      "packages": ["devworkspace-operator", "openshift-cert-manager-operator"],
-      "operators": [
-        {"name": "devworkspace-operator", "channel": "fast", "version": "0.43.0",
-         "csv": "devworkspace-operator.v0.43.0"}
+      "packages": [
+        {"name": "devworkspace-operator", "channel": "fast", "version": "0.43.0"},
+        {"name": "openshift-cert-manager-operator", "channel": "stable-v1", "version": "1.19.2"}
       ]
     }
   ],
@@ -641,10 +640,14 @@ What the check reports:
   - `pull_image` is the ref actually pulled: the mirror location when an
     IDMS/ICSP/ITMS entry redirects the image, otherwise `image` itself.
   - `pulled_from` is one of `mirror-host`, `IDMS`, `ICSP`, `ITMS` or `source`.
-  - Per operator: `name` is the package name, `channel` the Subscription's
-    channel, `version` the installed CSV's `spec.version`, and `csv` the
-    bundle name in the catalog's `olm.channel` entries. The same
-    package, channel and version installed in several namespaces is listed once.
+  - An operator belongs to the catalog that its InstallPlan installed the
+    current CSV from. When no InstallPlan is found, it falls back to the
+    Subscription's source.
+  - `packages` has one entry per operator: `name` is the package name,
+    `channel` is the Subscription's channel, and `version` is the installed
+    CSV's `spec.version`. These match `opm`'s `package`, channel `name` and
+    bundle `version`. The same package, channel and version installed in
+    several namespaces is listed once.
   - `unresolved_operators` lists Subscriptions whose CatalogSource no longer
     exists, so they have no image to render.
 

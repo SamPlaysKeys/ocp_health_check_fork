@@ -507,28 +507,30 @@ check("_split_image_ref tells digest from tag refs and keeps a registry port",
       and f._split_image_ref("mirror.local:5000/a/b") == ("mirror.local:5000/a/b", "tag"))
 check("connected cluster gets a 'Connected cluster' note", cm_no_mirror["notes"][0].startswith("Connected cluster"))
 
-_csvs = [{"metadata": {"name": "cluster-logging.v6.2.0", "namespace": "openshift-logging"}, "spec": {"version": "6.2.0"}}]
+_csvs = [{"metadata": {"name": "cluster-logging.v6.2.0", "namespace": "openshift-logging"}, "spec": {"version": "6.2.0"}},
+         {"metadata": {"name": "kubevirt-hyperconverged-operator.v4.18.3", "namespace": "openshift-cnv"}, "spec": {"version": "4.18.3"}}]
 _subs = [dict(x, spec=dict(x["spec"], channel="stable-6.2")) if x["metadata"]["name"] == "cluster-logging" else x for x in fx.MIRROR_SUBSCRIPTIONS]
 cg = f.catalog_mirror_report(fx.MIRROR_IDMS, [], [], fx.MIRROR_CATALOGSOURCES, _subs, fx.MIRROR_INSTALLPLANS, csvs=_csvs)
 cg_by_image = {c["image"]: c for c in cg["catalogs"]}
 _mirror_img = "mirror.local:5000/olm/redhat/redhat-operator-index:v4.20"
-check("catalogs groups operators by their Subscription's catalog image (one entry per image)",
-      set(cg_by_image) == {_mirror_img, "registry.redhat.io/redhat/redhat-operator-index:v4.20", "quay.io/acme/custom-index:latest"})
-check("mirrored catalog groups both operators subscribed to it, packages sorted/unique",
-      cg_by_image[_mirror_img]["packages"] == ["cluster-logging", "kubevirt-hyperconverged"])
-_cl = {o["name"]: o for o in cg_by_image[_mirror_img]["operators"]}["cluster-logging"]
-check("each grouped operator is exactly {name, channel, version, csv} with the CSV's real version",
-      _cl == {"name": "cluster-logging", "channel": "stable-6.2", "version": "6.2.0", "csv": "cluster-logging.v6.2.0"})
-_dup = f.catalog_mirror_report([], [], [], fx.MIRROR_CATALOGSOURCES,
-                                [fx.MIRROR_SUBSCRIPTIONS[0], dict(fx.MIRROR_SUBSCRIPTIONS[0], metadata={"name": "cluster-logging", "namespace": "other-ns"})], [])
-check("same package+channel+version subscribed in two namespaces is one catalog entry",
-      len({c["image"]: c for c in _dup["catalogs"]}[_mirror_img]["operators"]) == 1)
+_rh_img = "registry.redhat.io/redhat/redhat-operator-index:v4.20"
+_names = lambda img: [p["name"] for p in cg_by_image[img]["packages"]]
+check("catalogs has one entry per catalog image an operator was installed from",
+      set(cg_by_image) == {_mirror_img, _rh_img, "quay.io/acme/custom-index:latest"})
+check("packages items are exactly {name, channel, version}, version from the installed CSV",
+      cg_by_image[_mirror_img]["packages"] == [{"name": "cluster-logging", "channel": "stable-6.2", "version": "6.2.0"}])
+check("operator is grouped under its InstallPlan's catalog even when the Subscription was re-pointed to the mirror",
+      "kubevirt-hyperconverged" in _names(_rh_img) and "kubevirt-hyperconverged" not in _names(_mirror_img))
+check("InstallPlan catalog grouping: odf-operator under the default catalog it was installed from", "odf-operator" in _names(_rh_img))
+check("no InstallPlan -> falls back to the Subscription's catalog; missing CatalogSource -> unresolved_operators",
+      [p["name"] for p in cg["unresolved_operators"]] == ["certified-thing"] and cg["unresolved_operators"][0]["catalog_source"] == "certified-operators")
 check("catalog on a mirror host: pull_image is the image itself", cg_by_image[_mirror_img]["pull_image"] == _mirror_img and cg_by_image[_mirror_img]["pulled_from"] == "mirror-host")
 check("default catalog entry is marked default with its CatalogSource ref",
-      cg_by_image["registry.redhat.io/redhat/redhat-operator-index:v4.20"]["default"]
-      and cg_by_image["registry.redhat.io/redhat/redhat-operator-index:v4.20"]["catalog_sources"] == [{"name": "redhat-operators", "namespace": "openshift-marketplace"}])
-check("Subscription to a CatalogSource that doesn't exist goes to unresolved_operators, not a catalog",
-      [o["name"] for o in cg["unresolved_operators"]] == ["certified-thing"] and cg["unresolved_operators"][0]["catalog_source"] == "certified-operators")
+      cg_by_image[_rh_img]["default"] and cg_by_image[_rh_img]["catalog_sources"] == [{"name": "redhat-operators", "namespace": "openshift-marketplace"}])
+_dup = f.catalog_mirror_report([], [], [], fx.MIRROR_CATALOGSOURCES,
+                               [fx.MIRROR_SUBSCRIPTIONS[0], dict(fx.MIRROR_SUBSCRIPTIONS[0], metadata={"name": "cluster-logging", "namespace": "other-ns"}, status={})], [])
+check("same package+channel+version subscribed in two namespaces is one packages entry",
+      len({c["image"]: c for c in _dup["catalogs"]}[_mirror_img]["packages"]) == 1)
 
 cg_itms = f.catalog_mirror_report([], [], [], fx.MIRROR_CATALOGSOURCES, fx.MIRROR_SUBSCRIPTIONS, fx.MIRROR_INSTALLPLANS, itms=fx.MIRROR_ITMS)
 _rh = {c["image"]: c for c in cg_itms["catalogs"]}["registry.redhat.io/redhat/redhat-operator-index:v4.20"]

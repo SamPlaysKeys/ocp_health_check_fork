@@ -31,7 +31,7 @@
 # missing CRD (e.g. no IDMS API on an older cluster) just reads as empty.
 # The full result is also written to outputs/catalog_mirror_check.json. Its
 # `catalogs` list groups the installed operators by the catalog image their
-# Subscription resolves updates from (name, channel, version, csv)
+# InstallPlan installed them from (packages: name, channel, version)
 # so an external script can `opm render` each image once - pull_image is
 # the ref to pull (the mirror location when a mirror set redirects it).
 #
