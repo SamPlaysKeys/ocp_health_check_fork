@@ -12,3 +12,6 @@ __pycache__/
 .ansible/
 *.retry
 .python-version
+# Per-run data written by the playbook (operator snapshot, opm renders,
+# catalog mirror check) - cluster-specific, never committed.
+outputs/
