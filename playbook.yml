@@ -86,6 +86,10 @@
       ansible.builtin.include_tasks: tasks/89_catalog_opm_render.yml
       tags: [cluster_operators, olm, opm_render]
 
+    - name: 89b - Catalog mirror (IDMS/ICSP/ITMS) check - default sources disabled, InstallPlans from mirrored catalogs
+      ansible.builtin.include_tasks: tasks/89b_catalog_mirror_check.yml
+      tags: [cluster_operators, olm, catalog_mirror]
+
     - name: 90 - Render reports and evaluate overall readiness
       ansible.builtin.include_tasks: tasks/90_render_report.yml
       tags: [report, always]

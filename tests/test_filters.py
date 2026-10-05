@@ -419,6 +419,78 @@ check("opm_render_filter carries the channel's entries through as a flat list of
 check("opm_render_filter tolerates a garbage/non-JSON line mixed into the stream instead of crashing", True)  # implicit: the check above already proves this ran to completion
 check("opm_render_filter on empty/None stdout returns [], doesn't crash", f.opm_render_filter("", ["cluster-logging"]) == [] and f.opm_render_filter(None, []) == [])
 
+# ---- catalog_mirror_report ------------------------------------------------------
+cm = f.catalog_mirror_report(fx.MIRROR_IDMS, [], fx.MIRROR_OPERATORHUB_DEFAULTS_ON, fx.MIRROR_CATALOGSOURCES,
+                             fx.MIRROR_SUBSCRIPTIONS, fx.MIRROR_INSTALLPLANS)
+cm_ops = {o["package"]: o for o in cm["operators"]}
+check("catalog_mirror_report detects mirroring from an IDMS and extracts its registry host", cm["mirror_configured"] and cm["mirror_hosts"] == ["mirror.local:5000"])
+check("IDMS + default redhat-operators CatalogSource still present -> CRITICAL finding naming it (first finding)",
+      cm["findings"][0]["severity"] == "CRITICAL" and "redhat-operators are still present" in cm["findings"][0]["summary"])
+check("3 old-catalog operators + the default-source finding = 4 CRITICAL findings", [x["severity"] for x in cm["findings"]].count("CRITICAL") == 4)
+check("default sources that don't exist as CatalogSources are reported as not present", {d["name"]: d["present"] for d in cm["default_sources"]} ==
+      {"redhat-operators": True, "certified-operators": False, "community-operators": False, "redhat-marketplace": False})
+check("operator installed by an InstallPlan from the mirrored catalog is OK", cm_ops["cluster-logging"]["installplan_catalog_kind"] == "mirrored" and cm_ops["cluster-logging"]["severity"] == "OK")
+check("operator whose InstallPlan and Subscription both use the default catalog is CRITICAL",
+      cm_ops["odf-operator"]["installplan_catalog_kind"] == "default" and cm_ops["odf-operator"]["severity"] == "CRITICAL" and "re-point" in cm_ops["odf-operator"]["message"])
+check("operator installed from the default catalog but already re-pointed to the mirror is CRITICAL with the 'next update' note",
+      cm_ops["kubevirt-hyperconverged"]["severity"] == "CRITICAL" and "next update resolves from the mirror" in cm_ops["kubevirt-hyperconverged"]["message"])
+check("Subscription bound to a default source with no InstallPlan is CRITICAL", cm_ops["certified-thing"]["subscription_source_kind"] == "default" and cm_ops["certified-thing"]["severity"] == "CRITICAL")
+check("InstallPlan with only legacy spec.catalogSource resolves its catalog; custom non-mirror catalog is INFO",
+      cm_ops["custom-op"]["installplan_catalog"] == "custom-catalog" and cm_ops["custom-op"]["installplan_catalog_kind"] == "other" and cm_ops["custom-op"]["severity"] == "INFO")
+check("operator rows are sorted most-severe first", cm["operators"][0]["severity"] == "CRITICAL" and cm["operators"][-1]["severity"] == "OK")
+
+cm_hub_off = f.catalog_mirror_report(fx.MIRROR_IDMS, [], fx.MIRROR_OPERATORHUB_DEFAULTS_OFF, fx.MIRROR_CATALOGSOURCES[1:], [], [])
+check("IDMS + disableAllDefaultSources + no default CatalogSources left -> no CRITICAL/WARNING findings",
+      all(x["severity"] == "INFO" for x in cm_hub_off["findings"]) and all(d["disabled"] and not d["present"] for d in cm_hub_off["default_sources"]))
+
+cm_no_mirror = f.catalog_mirror_report([], [], fx.MIRROR_OPERATORHUB_DEFAULTS_ON, fx.MIRROR_CATALOGSOURCES, fx.MIRROR_SUBSCRIPTIONS, fx.MIRROR_INSTALLPLANS)
+check("no IDMS/ICSP -> mirror not configured and nothing flagged, even with defaults present",
+      not cm_no_mirror["mirror_configured"] and cm_no_mirror["findings"] == [] and all(o["severity"] == "OK" for o in cm_no_mirror["operators"]))
+
+cm_icsp = f.catalog_mirror_report([], [{"metadata": {"name": "icsp-0"}, "spec": {"repositoryDigestMirrors": [{"source": "registry.redhat.io", "mirrors": ["mirror.local:5000/redhat"]}]}}],
+                                  [], fx.MIRROR_CATALOGSOURCES, [], [])
+check("a legacy ImageContentSourcePolicy alone counts as a mirrored cluster", cm_icsp["mirror_configured"] and cm_icsp["mirror_sets"][0]["kind"] == "ImageContentSourcePolicy")
+check("ICSP alone + default CatalogSource present -> CRITICAL", any(x["severity"] == "CRITICAL" and "ICSP/icsp-0" in x["summary"] for x in cm_icsp["findings"]))
+cm_icsp_ops = f.catalog_mirror_report([], [{"metadata": {"name": "icsp-0"}, "spec": {"repositoryDigestMirrors": [{"source": "registry.redhat.io/redhat", "mirrors": ["mirror.local:5000/olm/redhat"]}]}}],
+                                      [], fx.MIRROR_CATALOGSOURCES, fx.MIRROR_SUBSCRIPTIONS, fx.MIRROR_INSTALLPLANS)
+check("ICSP alone also classifies InstallPlan catalogs: mirrored OK, old default CRITICAL",
+      {o["package"]: o["severity"] for o in cm_icsp_ops["operators"]}["cluster-logging"] == "OK"
+      and {o["package"]: o["severity"] for o in cm_icsp_ops["operators"]}["odf-operator"] == "CRITICAL")
+check("catalog_mirror_report on all-empty input doesn't crash", f.catalog_mirror_report([], [], [], [], [], [])["operators"] == [])
+
+check("IDMS without mirrorSourcePolicy defaults to AllowContactingSource -> INFO fallback finding",
+      any(x["severity"] == "INFO" and "fall back to the source registry" in x["summary"] for x in cm["findings"]))
+check("ICSP always falls back and gets a deprecation INFO finding",
+      cm_icsp["mirror_sets"][0]["entries"][0]["policy"] == "AllowContactingSource"
+      and any("oc adm migrate icsp" in x["summary"] for x in cm_icsp["findings"]))
+check("no ITMS: default catalog index (by tag) is pulled straight from the source registry, and the notes say so",
+      {r["name"]: r for r in cm["catalog_pull_paths"]}["redhat-operators"]["path"] == "source"
+      and any("No ImageTagMirrorSet" in n for n in cm["notes"]) and "no ITMS covers it" in cm["findings"][0]["summary"])
+check("catalog image already on the mirror host has pull path mirror-host",
+      {r["name"]: r for r in cm["catalog_pull_paths"]}["cs-redhat-operator-index"]["path"] == "mirror-host")
+
+cm_strict = f.catalog_mirror_report(fx.MIRROR_IDMS_NEVER_CONTACT, [], fx.MIRROR_OPERATORHUB_DEFAULTS_ON, fx.MIRROR_CATALOGSOURCES,
+                                    fx.MIRROR_SUBSCRIPTIONS, fx.MIRROR_INSTALLPLANS, itms=fx.MIRROR_ITMS)
+cm_strict_paths = {r["name"]: r for r in cm_strict["catalog_pull_paths"]}
+check("IDMS NeverContactSource is read per entry and reported", cm_strict["pull_policy"]["digest_never_contact"] and not cm_strict["pull_policy"]["digest_fallback"])
+check("NeverContactSource everywhere -> no fallback INFO finding", not any("fall back to the source registry" in x["summary"] for x in cm_strict["findings"]))
+check("NeverContactSource -> old-catalog operator message says unmirrored bundles fail to pull",
+      "ImagePullBackOff" in {o["package"]: o for o in cm_strict["operators"]}["odf-operator"]["message"])
+check("ITMS covering registry.redhat.io/redhat redirects the default catalog's tag pull (path ITMS, its policy)",
+      cm_strict_paths["redhat-operators"]["path"] == "ITMS" and cm_strict_paths["redhat-operators"]["policy"] == "NeverContactSource")
+check("default catalog is still CRITICAL even when an ITMS redirects its index", cm_strict["findings"][0]["severity"] == "CRITICAL")
+check("ITMS alone counts as a mirrored cluster", f.catalog_mirror_report([], [], [], [], [], [], itms=fx.MIRROR_ITMS)["mirror_configured"])
+check("a custom catalog on a host covered by a '*.' wildcard ITMS source is classified mirrored",
+      {o["package"]: o for o in f.catalog_mirror_report([], [], [], fx.MIRROR_CATALOGSOURCES, fx.MIRROR_SUBSCRIPTIONS, fx.MIRROR_INSTALLPLANS,
+                                                         itms=[{"metadata": {"name": "wild"}, "spec": {"imageTagMirrors": [{"source": "*.quay.io", "mirrors": ["mirror.local:5000/quay"]}, {"source": "quay.io", "mirrors": ["mirror.local:5000/quay"]}]}}])["operators"]}["custom-op"]["installplan_catalog_kind"] == "mirrored")
+check("_mirror_source_covers respects '/' boundaries (registry.redhat.io/red must not cover registry.redhat.io/redhat/x)",
+      not f._mirror_source_covers("registry.redhat.io/red", "registry.redhat.io/redhat/x") and f._mirror_source_covers("registry.redhat.io/redhat", "registry.redhat.io/redhat/x"))
+check("_split_image_ref tells digest from tag refs and keeps a registry port",
+      f._split_image_ref("mirror.local:5000/a/b@sha256:abc") == ("mirror.local:5000/a/b", "digest")
+      and f._split_image_ref("mirror.local:5000/a/b:v4.20") == ("mirror.local:5000/a/b", "tag")
+      and f._split_image_ref("mirror.local:5000/a/b") == ("mirror.local:5000/a/b", "tag"))
+check("connected cluster gets a 'Connected cluster' note", cm_no_mirror["notes"][0].startswith("Connected cluster"))
+
 print()
 if failures:
     print(f"{len(failures)} check(s) FAILED:")

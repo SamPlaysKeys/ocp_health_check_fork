@@ -1,0 +1,116 @@
+---
+# Catalog mirror (IDMS/ICSP/ITMS) check - companion to the per-catalog opm render
+# (task 89).
+#
+# Any ImageDigestMirrorSet, ImageContentSourcePolicy or ImageTagMirrorSet
+# makes this a mirrored cluster (each redirects pulls to the mirror, even
+# when the cluster can still reach the internet); none means a connected
+# cluster, where default catalogs are expected and nothing is flagged.
+# IDMS/ICSP only redirect digest pulls and ITMS tag pulls; each IDMS/ITMS
+# entry's mirrorSourcePolicy decides whether a mirror miss falls back to
+# the source registry (see section 13b of the filter plugin). On a mirrored
+# cluster this:
+#   1. flags CRITICAL if any default OperatorHub CatalogSource
+#      (catalog_default_sources: redhat-operators, certified-operators, ...)
+#      is still present in openshift-marketplace alongside the mirror -
+#      they should be disabled via OperatorHub/cluster
+#      spec.disableAllDefaultSources
+#   2. for every Subscription, follows status.installPlanRef to the
+#      InstallPlan that installed the current CSV and reads which
+#      CatalogSource it resolved from (status.bundleLookups[].catalogSourceRef):
+#      a mirrored catalog (image on a mirror host) is OK; a default or
+#      deleted catalog (InstallPlan or Subscription still bound to the old
+#      source) is CRITICAL; a custom catalog not pulled from the mirror is INFO
+#   3. reports how each CatalogSource index is really pulled (mirror host,
+#      IDMS/ICSP/ITMS redirect with its policy, or straight from the source
+#      registry), INFO when digest mirrors fall back to the source, and INFO
+#      for a deprecated ICSP still in use
+#
+# Self-contained (fetches its own Subscriptions/CatalogSources) so it runs
+# with --tags catalog_mirror alone. Every lookup is ignore_errors - a
+# missing CRD (e.g. no IDMS API on an older cluster) just reads as empty.
+# The full result is also written to outputs/catalog_mirror_check.json.
+#
+# Always runs (no enable flag): skipping it would let a mirrored cluster
+# with default sources or old-catalog InstallPlans report as healthy.
+- name: Catalog mirror (IDMS/ICSP/ITMS) check
+  block:
+    - name: Discover ImageDigestMirrorSets
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: ImageDigestMirrorSet
+      register: _cm_idms_raw
+      ignore_errors: true
+
+    - name: Discover ImageContentSourcePolicies (deprecated predecessor of IDMS)
+      kubernetes.core.k8s_info:
+        api_version: operator.openshift.io/v1alpha1
+        kind: ImageContentSourcePolicy
+      register: _cm_icsp_raw
+      ignore_errors: true
+
+    - name: Discover ImageTagMirrorSets (tag pulls - how catalog index images are referenced)
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: ImageTagMirrorSet
+      register: _cm_itms_raw
+      ignore_errors: true
+
+    - name: Read OperatorHub/cluster (default source enable/disable)
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: OperatorHub
+        name: cluster
+      register: _cm_operatorhub_raw
+      ignore_errors: true
+
+    - name: Discover CatalogSources (all namespaces)
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: CatalogSource
+      register: _cm_catalogsources_raw
+      ignore_errors: true
+
+    - name: Discover OLM Subscriptions (all namespaces)
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+      register: _cm_subscriptions_raw
+      ignore_errors: true
+
+    - name: Discover InstallPlans (all namespaces)
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+      register: _cm_installplans_raw
+      ignore_errors: true
+
+    - name: Build the catalog mirror report
+      ansible.builtin.set_fact:
+        catalog_mirror_data: "{{ (_cm_idms_raw.resources | default([])) | catalog_mirror_report(
+            _cm_icsp_raw.resources | default([]),
+            _cm_operatorhub_raw.resources | default([]),
+            _cm_catalogsources_raw.resources | default([]),
+            _cm_subscriptions_raw.resources | default([]),
+            _cm_installplans_raw.resources | default([]),
+            catalog_default_sources,
+            itms=_cm_itms_raw.resources | default([])) }}"
+
+    - name: Record catalog mirror findings
+      ansible.builtin.set_fact:
+        findings: "{{ findings + [{'section': 'Catalog mirror (IDMS/ICSP/ITMS)', 'severity': item.severity, 'summary': item.summary}] }}"
+      loop: "{{ catalog_mirror_data.findings }}"
+      loop_control:
+        label: "{{ item.severity }}"
+
+    - name: Ensure the outputs directory exists
+      ansible.builtin.file:
+        path: "{{ catalog_render_output_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write catalog_mirror_check.json
+      ansible.builtin.copy:
+        content: "{{ catalog_mirror_data | to_nice_json }}\n"
+        dest: "{{ catalog_render_output_dir }}/catalog_mirror_check.json"
+        mode: "0644"

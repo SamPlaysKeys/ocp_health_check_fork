@@ -622,3 +622,63 @@ CATALOG_POD_SQLITE = {
     "spec": {"containers": [{"name": "registry-server", "command": ["opm", "registry", "serve", "--database", "/database/index.db"]}]},
     "status": {"phase": "Running"},
 }
+
+# ---- Catalog mirror (IDMS/ICSP/ITMS) check ----
+# A mirrored cluster (one IDMS, mirror host mirror.local:5000) that still
+# has the default redhat-operators CatalogSource next to its mirrored
+# cs-redhat-operator-index one. Operators cover every classification:
+# installed from the mirror (OK), installed from the default source and
+# still subscribed to it (WARNING), installed from the default source but
+# Subscription already re-pointed (WARNING), subscribed to a deleted
+# default source (WARNING), and a custom catalog not on the mirror (INFO).
+MIRROR_IDMS = [
+    {"metadata": {"name": "idms-operator-0"}, "spec": {"imageDigestMirrors": [
+        {"source": "registry.redhat.io/redhat", "mirrors": ["mirror.local:5000/olm/redhat"]},
+        {"source": "registry.redhat.io/openshift4", "mirrors": ["mirror.local:5000/olm/openshift4"]},
+    ]}},
+]
+MIRROR_OPERATORHUB_DEFAULTS_ON = [{"metadata": {"name": "cluster"}, "spec": {}}]
+MIRROR_OPERATORHUB_DEFAULTS_OFF = [{"metadata": {"name": "cluster"}, "spec": {"disableAllDefaultSources": True}}]
+MIRROR_CATALOGSOURCES = [
+    {"metadata": {"name": "redhat-operators", "namespace": "openshift-marketplace"}, "spec": {"image": "registry.redhat.io/redhat/redhat-operator-index:v4.20"}},
+    {"metadata": {"name": "cs-redhat-operator-index", "namespace": "openshift-marketplace"}, "spec": {"image": "mirror.local:5000/olm/redhat/redhat-operator-index:v4.20"}},
+    {"metadata": {"name": "custom-catalog", "namespace": "openshift-marketplace"}, "spec": {"image": "quay.io/acme/custom-index:latest"}},
+]
+MIRROR_SUBSCRIPTIONS = [
+    {"metadata": {"name": "cluster-logging", "namespace": "openshift-logging"},
+     "spec": {"name": "cluster-logging", "source": "cs-redhat-operator-index", "sourceNamespace": "openshift-marketplace"},
+     "status": {"installedCSV": "cluster-logging.v6.2.0", "installPlanRef": {"name": "install-aaa", "namespace": "openshift-logging"}}},
+    {"metadata": {"name": "odf-operator", "namespace": "openshift-storage"},
+     "spec": {"name": "odf-operator", "source": "redhat-operators", "sourceNamespace": "openshift-marketplace"},
+     "status": {"installedCSV": "odf-operator.v4.18.0", "installPlanRef": {"name": "install-bbb", "namespace": "openshift-storage"}}},
+    {"metadata": {"name": "kubevirt-hyperconverged", "namespace": "openshift-cnv"},
+     "spec": {"name": "kubevirt-hyperconverged", "source": "cs-redhat-operator-index", "sourceNamespace": "openshift-marketplace"},
+     "status": {"installedCSV": "kubevirt-hyperconverged-operator.v4.18.3", "installPlanRef": {"name": "install-ccc", "namespace": "openshift-cnv"}}},
+    {"metadata": {"name": "certified-thing", "namespace": "ns-cert"},
+     "spec": {"name": "certified-thing", "source": "certified-operators", "sourceNamespace": "openshift-marketplace"},
+     "status": {"installedCSV": "certified-thing.v1.0.0"}},
+    {"metadata": {"name": "custom-op", "namespace": "ns-custom"},
+     "spec": {"name": "custom-op", "source": "custom-catalog", "sourceNamespace": "openshift-marketplace"},
+     "status": {"installedCSV": "custom-op.v0.1.0", "installPlanRef": {"name": "install-ddd", "namespace": "ns-custom"}}},
+]
+MIRROR_INSTALLPLANS = [
+    {"metadata": {"name": "install-aaa", "namespace": "openshift-logging"}, "status": {"bundleLookups": [
+        {"identifier": "cluster-logging.v6.2.0", "catalogSourceRef": {"name": "cs-redhat-operator-index", "namespace": "openshift-marketplace"}}]}},
+    {"metadata": {"name": "install-bbb", "namespace": "openshift-storage"}, "status": {"bundleLookups": [
+        {"identifier": "odf-operator.v4.18.0", "catalogSourceRef": {"name": "redhat-operators", "namespace": "openshift-marketplace"}}]}},
+    {"metadata": {"name": "install-ccc", "namespace": "openshift-cnv"}, "status": {"bundleLookups": [
+        {"identifier": "kubevirt-hyperconverged-operator.v4.18.3", "catalogSourceRef": {"name": "redhat-operators", "namespace": "openshift-marketplace"}}]}},
+    {"metadata": {"name": "install-ddd", "namespace": "ns-custom"}, "spec": {"catalogSource": "custom-catalog", "catalogSourceNamespace": "openshift-marketplace"}},
+]
+# Same mirror, but strict: every IDMS entry NeverContactSource, plus an ITMS
+# that redirects tag pulls of registry.redhat.io/redhat (catalog indexes).
+MIRROR_IDMS_NEVER_CONTACT = [
+    {"metadata": {"name": "idms-operator-0"}, "spec": {"imageDigestMirrors": [
+        {"source": "registry.redhat.io/redhat", "mirrors": ["mirror.local:5000/olm/redhat"], "mirrorSourcePolicy": "NeverContactSource"},
+    ]}},
+]
+MIRROR_ITMS = [
+    {"metadata": {"name": "itms-operator-0"}, "spec": {"imageTagMirrors": [
+        {"source": "registry.redhat.io/redhat", "mirrors": ["mirror.local:5000/olm/redhat"], "mirrorSourcePolicy": "NeverContactSource"},
+    ]}},
+]

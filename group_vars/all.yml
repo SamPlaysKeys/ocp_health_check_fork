@@ -279,6 +279,23 @@ cluster_operators_output_dir: "{{ playbook_dir }}/outputs"
 catalog_render_enabled: true
 catalog_render_output_dir: "{{ cluster_operators_output_dir }}"
 
+# Catalog mirror (IDMS/ICSP/ITMS) check (task 89b, tasks/89b_catalog_mirror_check.yml).
+# Always runs - there is no enable flag, since skipping it would let a
+# mirrored cluster report as healthy. Any ImageDigestMirrorSet,
+# ImageContentSourcePolicy or ImageTagMirrorSet = mirrored cluster; none =
+# connected cluster (nothing flagged). Each mirror entry's
+# mirrorSourcePolicy (fallback to source or not) and each catalog index's
+# real pull path are reported too. On a mirrored cluster: CRITICAL if a default
+# CatalogSource below is still present in openshift-marketplace, and
+# CRITICAL per operator whose InstallPlan/Subscription is still bound to a
+# default (or deleted) catalog instead of a mirrored one.
+# Also writes <catalog_render_output_dir>/catalog_mirror_check.json.
+catalog_default_sources:
+  - redhat-operators
+  - certified-operators
+  - community-operators
+  - redhat-marketplace
+
 # -----------------------------------------------------------------------------
 # 11. Report / behavior
 # -----------------------------------------------------------------------------
