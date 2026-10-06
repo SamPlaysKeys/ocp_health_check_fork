@@ -672,6 +672,34 @@ MIRROR_INSTALLPLANS = [
         {"identifier": "kubevirt-hyperconverged-operator.v4.18.3", "catalogSourceRef": {"name": "redhat-operators", "namespace": "openshift-marketplace"}}]}},
     {"metadata": {"name": "install-ddd", "namespace": "ns-custom"}, "spec": {"catalogSource": "custom-catalog", "catalogSourceNamespace": "openshift-marketplace"}},
 ]
+# One InstallPlan in openshift-operators shared by operators from two
+# catalogs: it has a bundleLookup only for external-secrets, a plan step for
+# grafana (pointed at certified to show the step wins over the Subscription),
+# and nothing for datadog - which must not inherit the community lookup.
+SHARED_IP_CATALOGSOURCES = [
+    {"metadata": {"name": "certified-operators", "namespace": "openshift-marketplace"}, "spec": {"image": "registry.redhat.io/redhat/certified-operator-index:v4.18"}},
+    {"metadata": {"name": "community-operators", "namespace": "openshift-marketplace"}, "spec": {"image": "registry.redhat.io/redhat/community-operator-index:v4.18"}},
+]
+_SHARED_IP_REF = {"name": "install-2hwpz", "namespace": "openshift-operators"}
+SHARED_IP_SUBSCRIPTIONS = [
+    {"metadata": {"name": "datadog-operator-certified", "namespace": "openshift-operators"},
+     "spec": {"name": "datadog-operator-certified", "channel": "stable", "source": "certified-operators", "sourceNamespace": "openshift-marketplace"},
+     "status": {"installedCSV": "datadog-operator.v1.19.1", "installPlanRef": _SHARED_IP_REF}},
+    {"metadata": {"name": "external-secrets-operator", "namespace": "openshift-operators"},
+     "spec": {"name": "external-secrets-operator", "channel": "alpha", "source": "community-operators", "sourceNamespace": "openshift-marketplace"},
+     "status": {"installedCSV": "external-secrets-operator.v0.11.0", "installPlanRef": _SHARED_IP_REF}},
+    {"metadata": {"name": "grafana-operator", "namespace": "openshift-operators"},
+     "spec": {"name": "grafana-operator", "channel": "v5", "source": "certified-operators", "sourceNamespace": "openshift-marketplace"},
+     "status": {"installedCSV": "grafana-operator.v5.20.0", "installPlanRef": _SHARED_IP_REF}},
+]
+SHARED_IP_INSTALLPLANS = [
+    {"metadata": {"name": "install-2hwpz", "namespace": "openshift-operators"}, "status": {
+        "bundleLookups": [{"identifier": "external-secrets-operator.v0.11.0",
+                           "catalogSourceRef": {"name": "community-operators", "namespace": "openshift-marketplace"}}],
+        "plan": [{"resolving": "grafana-operator.v5.20.0",
+                  "resource": {"kind": "ClusterServiceVersion", "name": "grafana-operator.v5.20.0",
+                               "sourceName": "community-operators", "sourceNamespace": "openshift-marketplace"}}]}},
+]
 # Same mirror, but strict: every IDMS entry NeverContactSource, plus an ITMS
 # that redirects tag pulls of registry.redhat.io/redhat (catalog indexes).
 MIRROR_IDMS_NEVER_CONTACT = [

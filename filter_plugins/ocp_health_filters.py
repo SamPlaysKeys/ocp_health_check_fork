@@ -1898,7 +1898,9 @@ def catalog_mirror_report(
     - operators: one row per Subscription. The catalog that installed the
       current CSV is read from the InstallPlan the Subscription references
       (status.installPlanRef): the bundleLookups entry for that CSV, else
-      any bundleLookup, else the legacy spec.catalogSource. Each catalog is
+      the status.plan step resolving it, else the legacy spec.catalogSource
+      (only on an InstallPlan with neither - one InstallPlan can cover
+      operators from several catalogs). Each catalog is
       classified 'mirrored' (pulled from the mirror - see catalog_pull_paths),
       'default' (a default OperatorHub source), 'missing' (CatalogSource no
       longer exists), 'other' (custom catalog pulled from its own registry)
@@ -2079,11 +2081,25 @@ def catalog_mirror_report(
         ip = ip_by_key.get((ip_ref.get("namespace") or ns, ip_name)) if ip_name else None
         ip_cat_name, ip_cat_ns = "", ""
         if ip:
+            # One InstallPlan can cover every operator resolved together in
+            # a namespace (e.g. openshift-operators), from different
+            # catalogs - only this CSV's own bundleLookup or plan step says
+            # where it came from. spec.catalogSource is trusted only on a
+            # legacy InstallPlan that has neither.
             lookups = _get(ip, "status.bundleLookups", []) or []
-            match = [b for b in lookups if b.get("identifier") == csv] or lookups
-            ref = (match[0].get("catalogSourceRef") or {}) if match else {}
-            ip_cat_name = ref.get("name") or _get(ip, "spec.catalogSource", "")
-            ip_cat_ns = ref.get("namespace") or _get(ip, "spec.catalogSourceNamespace") or ns
+            steps = _get(ip, "status.plan", []) or []
+            lookup = next((b for b in lookups if isinstance(b, dict) and b.get("identifier") == csv), None)
+            step = next((s for s in steps if isinstance(s, dict) and s.get("resolving") == csv
+                         and (s.get("resource") or {}).get("sourceName")), None)
+            if lookup:
+                ref = lookup.get("catalogSourceRef") or {}
+                ip_cat_name, ip_cat_ns = ref.get("name", ""), ref.get("namespace") or ns
+            elif step:
+                res = step["resource"]
+                ip_cat_name, ip_cat_ns = res["sourceName"], res.get("sourceNamespace") or ns
+            elif not lookups and not steps:
+                ip_cat_name = _get(ip, "spec.catalogSource", "")
+                ip_cat_ns = _get(ip, "spec.catalogSourceNamespace") or ns
         ip_kind, ip_image = classify(ip_cat_ns, ip_cat_name)
 
         severity, message = "OK", ""

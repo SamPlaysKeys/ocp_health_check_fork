@@ -601,6 +601,18 @@ check("max 4.19 on an EUS 4.18->4.20 path -> one CRITICAL naming the first block
 check("max 4.19 on a 4.18->4.19 path -> nothing flagged", f.catalog_max_ocp_findings(mx["catalog_export"], ["4.18", "4.19"]) == [])
 check("catalog_max_ocp_findings tolerates an empty export/path", f.catalog_max_ocp_findings({}, []) == [])
 
+# ---- Shared InstallPlan across catalogs ----------------------------------------
+# openshift-operators: one InstallPlan covers operators from the certified and
+# community catalogs, and has no bundleLookup for the certified one.
+sh = f.catalog_mirror_report([], [], [], fx.SHARED_IP_CATALOGSOURCES, fx.SHARED_IP_SUBSCRIPTIONS, fx.SHARED_IP_INSTALLPLANS)
+sh_img = {p["name"]: o["pull_image"] for o in sh["catalog_export"]["operators"] for p in o["packages"]}
+check("shared InstallPlan without a lookup for this CSV -> the Subscription's catalog, not another operator's",
+      sh_img["datadog-operator-certified"].startswith("registry.redhat.io/redhat/certified-operator-index"))
+check("shared InstallPlan: the other operator keeps its own lookup's catalog",
+      sh_img["external-secrets-operator"].startswith("registry.redhat.io/redhat/community-operator-index"))
+check("shared InstallPlan: a status.plan step resolving the CSV names its catalog",
+      sh_img["grafana-operator"].startswith("registry.redhat.io/redhat/community-operator-index"))
+
 print()
 if failures:
     print(f"{len(failures)} check(s) FAILED:")
