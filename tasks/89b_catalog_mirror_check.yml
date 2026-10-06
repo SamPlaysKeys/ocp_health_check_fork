@@ -30,13 +30,15 @@
 # with --tags catalog_mirror alone. Every lookup is ignore_errors - a
 # missing CRD (e.g. no IDMS API on an older cluster) just reads as empty.
 # outputs/catalog_mirror_check.json is only what an external opm script
-# needs: {"cluster": {current, target, channel, ocp_path}, "operators":
+# needs: {"cluster": {current, target, channel, ocp_path, upgrade_path}, "operators":
 # [{"pull_image", "packages": [{name, channel, version, max_ocp_version,
 # main, required_by}]}]}. An installed CSV whose olm.maxOpenShiftVersion is
 # below a release on ocp_path is also a CRITICAL finding (OLM blocks the
 # cluster upgrade until that operator is upgraded) - ocp_path being the releases whose catalogs to fetch
 # (target from upgrade_target_version, else upgrade_channel, else EUS:
-# even minor +2, odd +1), and the installed operators grouped by the catalog image
+# even minor +2, odd +1), upgrade_path the same route at x.y.z from the
+# Cincinnati graph (section 11; [] when no upgrade_channel was set, the
+# graph was unreachable, or section 11 didn't run in a --tags run), and the installed operators grouped by the catalog image
 # their InstallPlan installed them from, pull_image being the ref to pull
 # (the mirror location when a mirror set redirects it). main=false marks
 # sub-operators another operator pulled in (see catalog_mirror_report()).
@@ -142,7 +144,8 @@
     - name: Resolve the upgrade path for the export (upgrade_target_version, else upgrade_channel, else EUS)
       ansible.builtin.set_fact:
         _cm_export_cluster: "{{ ((_cm_clusterversion_raw.resources | default([{}]) | first | default({})).status.desired.version | default(''))
-            | catalog_export_cluster(upgrade_target_version | default(''), upgrade_channel | default('')) }}"
+            | catalog_export_cluster(upgrade_target_version | default(''), upgrade_channel | default(''),
+                (upgrade_path_result | default({})).hops | default([]) if (upgrade_path_result | default({})).found | default(false) else []) }}"
 
     - name: Flag installed operators whose maxOpenShiftVersion is below a release on the upgrade path
       ansible.builtin.set_fact:

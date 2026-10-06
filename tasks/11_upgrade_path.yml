@@ -89,9 +89,13 @@
   ignore_errors: true
   when: upgrade_channel_resolution.error is not defined
 
+# An explicit x.y.z upgrade_target_version is routed to exactly, not to the
+# channel's newest z of that minor - otherwise the hops would end somewhere
+# other than the version actually being installed.
 - name: Compute the hop-by-hop path through the graph to the resolved target
   ansible.builtin.set_fact:
-    upgrade_path_result: "{{ (_upgrade_graph_raw.json | default({})) | cincinnati_shortest_path(current_version, upgrade_channel_resolution.target_major, upgrade_channel_resolution.target_minor) }}"
+    upgrade_path_result: "{{ (_upgrade_graph_raw.json | default({})) | cincinnati_shortest_path(current_version, upgrade_channel_resolution.target_major, upgrade_channel_resolution.target_minor,
+        upgrade_target_version if _upgrade_target_was_explicit | bool else '') }}"
   when:
     - upgrade_channel_resolution.error is not defined
     - _upgrade_graph_raw is defined
