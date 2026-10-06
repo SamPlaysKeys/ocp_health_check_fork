@@ -1153,12 +1153,14 @@ def resolve_upgrade_channel(current_version: Any, upgrade_channel: Any) -> Dict[
 
 
 def cincinnati_shortest_path(
-    graph: Any, current_version: Any, target_major: int, target_minor: int
+    graph: Any, current_version: Any, target_major: int, target_minor: int, target_version: Any = ""
 ) -> Dict[str, Any]:
     """Given a raw Cincinnati /graph API response ({'nodes': [{'version': ...}, ...],
     'edges': [[from_index, to_index], ...]}), find the shortest sequence of
     Cincinnati-endorsed upgrade hops from `current_version` to the highest
-    `target_major.target_minor.z` release present in the graph.
+    `target_major.target_minor.z` release present in the graph - or, when
+    `target_version` is a full x.y.z (an explicit upgrade_target_version),
+    to exactly that release (a bare x.y is ignored).
 
     Using the real graph (rather than hand-computing "current + 2") matters
     specifically for EUS: an EUS channel's graph does NOT contain a direct
@@ -1193,15 +1195,23 @@ def cincinnati_shortest_path(
             ),
         }
 
+    exact = str(target_version or "").strip() if _parse_ocp_version(target_version) else ""
     candidates = []
     for i, v in version_by_index.items():
         parsed = _parse_ocp_version(v)
-        if parsed and parsed[0] == target_major and parsed[1] == target_minor:
+        if exact:
+            if v == exact:
+                candidates.append((0, i, v))
+        elif parsed and parsed[0] == target_major and parsed[1] == target_minor:
             candidates.append((parsed[2], i, v))
     if not candidates:
         return {
             "found": False,
-            "reason": f"no {target_major}.{target_minor}.z release is present in this channel's graph yet",
+            "reason": (
+                f"target version {exact} is not present in this channel's graph"
+                if exact
+                else f"no {target_major}.{target_minor}.z release is present in this channel's graph yet"
+            ),
         }
     candidates.sort()
     _, target_idx, target_version = candidates[-1]
@@ -1829,7 +1839,9 @@ def cluster_folder_name(infrastructure_name: Any, fallback: Any = "cluster") -> 
     return re.sub(r"-[a-z0-9]{5,6}$", "", name) or name
 
 
-def catalog_export_cluster(current_version: Any, target_version: Any = "", upgrade_channel: Any = "") -> Dict[str, Any]:
+def catalog_export_cluster(
+    current_version: Any, target_version: Any = "", upgrade_channel: Any = "", upgrade_hops: Any = None
+) -> Dict[str, Any]:
     """The `cluster` block of catalog_mirror_check.json: which OCP releases
     the upgrade passes through, so a consumer knows which catalog versions
     to fetch.
@@ -1841,6 +1853,10 @@ def catalog_export_cluster(current_version: Any, target_version: Any = "", upgra
     otherwise ('stable' for a one-release EUS jump such as 4.19 -> 4.20),
     because consumers (olm-upgrade-analyzer) validate the span against it.
     ocp_path lists every major.minor from current to target, inclusive.
+    upgrade_path is the same route at x.y.z - the Cincinnati hops from
+    cincinnati_shortest_path() - and is [] unless those hops start at the
+    current version and end at the target (no graph reachable, or a target
+    the graph doesn't lead to).
     Returns {"error": ...} instead of raising when nothing resolves."""
     parsed = _parse_ocp_version(current_version)
     if not parsed:
@@ -1866,11 +1882,15 @@ def catalog_export_cluster(current_version: Any, target_version: Any = "", upgra
         return {"error": f"target {target} is not a newer minor of {major}.{minor}"}
 
     span = tminor - minor
+    hops = [str(h) for h in (upgrade_hops or [])]
+    if not (len(hops) > 1 and hops[0] == str(current_version) and hops[-1] == target):
+        hops = []
     return {
         "current": str(current_version),
         "target": target,
         "channel": "eus" if span == 2 else (prefix if prefix != "eus" else "stable"),
         "ocp_path": [f"{major}.{m}" for m in range(minor, tminor + 1)],
+        "upgrade_path": hops,
     }
 
 

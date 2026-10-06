@@ -634,8 +634,9 @@ What the check reports:
   ```json
   {
     "cluster_name": "nam-d3m-03-nvmmf",
-    "cluster": {"current": "4.18.28", "target": "4.20", "channel": "eus",
-                "ocp_path": ["4.18", "4.19", "4.20"]},
+    "cluster": {"current": "4.18.14", "target": "4.20.34", "channel": "eus",
+                "ocp_path": ["4.18", "4.19", "4.20"],
+                "upgrade_path": ["4.18.14", "4.18.30", "4.19.33", "4.20.34"]},
     "operators": [
       {
         "pull_image": "mirror.local:5000/olm/redhat/redhat-operator-index:v4.18",
@@ -656,6 +657,12 @@ What the check reports:
     resolved from `upgrade_channel`, which defaults to EUS: an even current
     minor goes +2, an odd one +1. `channel` is `eus` for a two-release path
     and `stable` (or the given channel prefix) for a one-release path.
+  - `cluster.upgrade_path` is the same route at z-stream level: the hops
+    the Cincinnati graph endorses from the current version to the target,
+    to the exact `upgrade_target_version` when one is set. It needs
+    `upgrade_channel` and a reachable `upgrade_graph_url`; otherwise it is
+    `[]` and `target` is only `major.minor` unless `upgrade_target_version`
+    gives the z.
   - `pull_image` is the catalog ref actually pulled. When an IDMS, ICSP or
     ITMS entry redirects the CatalogSource image, it is the mirror location;
     otherwise it is the image itself.

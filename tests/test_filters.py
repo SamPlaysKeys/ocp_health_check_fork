@@ -323,6 +323,15 @@ p = f.cincinnati_shortest_path(fx.CINCINNATI_GRAPH_EUS_4_20, "4.20.1", 4, 20)
 check("already at the target version -> found, single-element path, no BFS needed",
       p["found"] is True and p["hops"] == ["4.20.1"] and p["target_version"] == "4.20.1")
 
+p = f.cincinnati_shortest_path(fx.CINCINNATI_GRAPH_EUS_4_20, "4.18.14", 4, 20, "4.20.0")
+check("explicit x.y.z target is routed to exactly, not the newest z of that minor",
+      p["found"] is True and p["hops"][-1] == "4.20.0" and p["target_version"] == "4.20.0")
+p = f.cincinnati_shortest_path(fx.CINCINNATI_GRAPH_EUS_4_20, "4.18.14", 4, 20, "4.20.34")
+check("explicit target missing from the graph -> not found, with a clear reason",
+      p["found"] is False and "4.20.34 is not present" in p["reason"])
+p = f.cincinnati_shortest_path(fx.CINCINNATI_GRAPH_EUS_4_20, "4.18.14", 4, 20, "4.20")
+check("a bare x.y target is ignored -> newest z of the minor", p["found"] is True and p["target_version"] == "4.20.1")
+
 # ---- cephcluster_report -----------------------------------------------------
 cc_ready = f.cephcluster_report(fx.CEPHCLUSTER_READY)
 check("cephcluster_report returns 1 row", len(cc_ready) == 1)
@@ -572,13 +581,17 @@ check("catalog_export has one entry per pull_image with all its packages",
 
 # ---- catalog_export_cluster ------------------------------------------------------
 check("even current minor, nothing given -> EUS +2, channel eus, full path",
-      f.catalog_export_cluster("4.18.28") == {"current": "4.18.28", "target": "4.20", "channel": "eus", "ocp_path": ["4.18", "4.19", "4.20"]})
+      f.catalog_export_cluster("4.18.28") == {"current": "4.18.28", "target": "4.20", "channel": "eus", "ocp_path": ["4.18", "4.19", "4.20"], "upgrade_path": []})
 check("odd current minor, nothing given -> +1 to the next even, channel stable (one-release span)",
-      f.catalog_export_cluster("4.19.10") == {"current": "4.19.10", "target": "4.20", "channel": "stable", "ocp_path": ["4.19", "4.20"]})
+      f.catalog_export_cluster("4.19.10") == {"current": "4.19.10", "target": "4.20", "channel": "stable", "ocp_path": ["4.19", "4.20"], "upgrade_path": []})
 check("upgrade_channel stable -> +1", f.catalog_export_cluster("4.18.28", "", "stable")["ocp_path"] == ["4.18", "4.19"])
 check("qualified upgrade_channel eus-4.20 is used as given", f.catalog_export_cluster("4.18.28", "", "eus-4.20")["target"] == "4.20")
 check("explicit target version wins; two-release span -> eus",
-      f.catalog_export_cluster("4.18.28", "4.20.12", "stable") == {"current": "4.18.28", "target": "4.20.12", "channel": "eus", "ocp_path": ["4.18", "4.19", "4.20"]})
+      f.catalog_export_cluster("4.18.28", "4.20.12", "stable") == {"current": "4.18.28", "target": "4.20.12", "channel": "eus", "ocp_path": ["4.18", "4.19", "4.20"], "upgrade_path": []})
+check("graph hops from current to target become upgrade_path",
+      f.catalog_export_cluster("4.18.14", "4.20.34", "eus", ["4.18.14", "4.19.25", "4.20.34"])["upgrade_path"] == ["4.18.14", "4.19.25", "4.20.34"])
+check("hops that don't end at the target are dropped, not exported",
+      f.catalog_export_cluster("4.18.14", "4.20.34", "eus", ["4.18.14", "4.19.25", "4.20.40"])["upgrade_path"] == [])
 check("explicit major.minor target is accepted", f.catalog_export_cluster("4.18.28", "4.19")["ocp_path"] == ["4.18", "4.19"])
 check("target not newer than current -> error, not a crash", "error" in f.catalog_export_cluster("4.18.28", "4.18.30"))
 check("unparseable current version -> error, not a crash", "error" in f.catalog_export_cluster(""))
