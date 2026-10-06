@@ -601,6 +601,14 @@ check("max 4.19 on an EUS 4.18->4.20 path -> one CRITICAL naming the first block
 check("max 4.19 on a 4.18->4.19 path -> nothing flagged", f.catalog_max_ocp_findings(mx["catalog_export"], ["4.18", "4.19"]) == [])
 check("catalog_max_ocp_findings tolerates an empty export/path", f.catalog_max_ocp_findings({}, []) == [])
 
+# ---- Per-cluster output folder -------------------------------------------------
+check("cluster_folder_name strips the installer's random suffix",
+      f.cluster_folder_name("nam-d3m-03-nvmmf-x7k2p") == "nam-d3m-03-nvmmf" and f.cluster_folder_name("ocp5-a1b2c3") == "ocp5")
+check("cluster_folder_name keeps a name without a 5-6 char suffix",
+      f.cluster_folder_name("ocp5") == "ocp5" and f.cluster_folder_name("prod-east-1234567") == "prod-east-1234567")
+check("cluster_folder_name falls back when the name is unknown/empty",
+      f.cluster_folder_name("unknown", "f80e7e4a") == "f80e7e4a" and f.cluster_folder_name(None) == "cluster")
+
 # ---- Shared InstallPlan across catalogs ----------------------------------------
 # openshift-operators: one InstallPlan covers operators from the certified and
 # community catalogs, and has no bundleLookup for the certified one.

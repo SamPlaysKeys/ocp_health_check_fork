@@ -159,6 +159,6 @@
 
     - name: Write catalog_mirror_check.json
       ansible.builtin.copy:
-        content: "{{ ({'cluster': _cm_export_cluster} | combine(catalog_mirror_data.catalog_export)) | to_nice_json }}\n"
+        content: "{{ ({'cluster_name': cluster_folder, 'cluster': _cm_export_cluster} | combine(catalog_mirror_data.catalog_export)) | to_nice_json }}\n"
         dest: "{{ catalog_render_output_dir }}/catalog_mirror_check.json"
         mode: "0644"

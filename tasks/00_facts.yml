@@ -94,9 +94,3 @@
   ansible.builtin.set_fact:
     findings: []
 
-- name: Ensure report output directory exists
-  ansible.builtin.file:
-    path: "{{ report_output_dir }}"
-    state: directory
-    mode: "0755"
-  delegate_to: localhost

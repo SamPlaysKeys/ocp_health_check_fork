@@ -5,9 +5,20 @@ cluster's readiness for an upgrade and produces three report artifacts:
 
 | File | Purpose |
 |---|---|
-| `reports/*.md` | Markdown, meant to be committed alongside the change ticket in git |
-| `reports/*.html` | Full standalone report, open in any browser |
-| `reports/*.summary.html` | Compact HTML fragment/widget, embed via `<iframe>` in a dashboard/ticket |
+| `outputs/<cluster>/reports/*.md` | Markdown, meant to be committed alongside the change ticket in git |
+| `outputs/<cluster>/reports/*.html` | Full standalone report, open in any browser |
+| `outputs/<cluster>/reports/*.summary.html` | Compact HTML fragment/widget, embed via `<iframe>` in a dashboard/ticket |
+
+Everything a run writes goes into one folder per cluster,
+`outputs/<cluster>/`, so runs against many clusters don't mix. Inside it,
+`reports/` holds these reports plus `*.status.json`, and `operators/` holds
+the operator and catalog outputs described below. `<cluster>`
+is the cluster's `status.infrastructureName` without the random suffix the
+installer appends (`nam-d3m-03-nvmmf-x7k2p` -> `nam-d3m-03-nvmmf`), or the
+short cluster ID when the name can't be read. The JSON outputs
+(`cluster_operators_installed.json`, `catalog_mirror_check.json`,
+`*.status.json`) carry the same value as a top-level `"cluster_name"`.
+Set `report_output_dir` / `cluster_operators_output_dir` to write elsewhere.
 
 It never modifies the cluster - every task is a `k8s_info` read or (optionally)
 a `pxctl status`/`pxctl license list` exec into an existing Portworx pod, or a
@@ -101,7 +112,7 @@ into an existing ODF `rook-ceph-tools` pod.
     `cluster_operators_snapshot_enabled`, default true) - a standalone data
     dump, not part of the findings/severity report above: scans every OLM
     Subscription/ClusterServiceVersion/CatalogSource and writes a
-    fixed-shape `outputs/cluster_operators_installed.json` (plus a
+    fixed-shape `outputs/<cluster>/operators/cluster_operators_installed.json` (plus a
     companion `.md`) listing every installed operator's package name,
     subscribed channel, exact CSV version, and the image of whichever
     CatalogSource it came from (Red Hat, certified, marketplace, or
@@ -113,7 +124,7 @@ into an existing ODF `rook-ceph-tools` pod.
     #13: for every CatalogSource an installed operator actually came from,
     execs `opm render <source-path> -o json` inside that CatalogSource's own
     already-running pod and writes the `olm.channel` entries for just this
-    cluster's installed packages to `outputs/<catalog-image-name>_<tag>.json`
+    cluster's installed packages to `outputs/<cluster>/operators/<catalog-image-name>_<tag>.json`
     - one file per unique catalog image, so a downstream consumer can walk
     each package's `replaces`/`skipRange` graph itself. Best-effort per
     catalog (a missing pod or failed exec becomes a WARNING finding, not a
@@ -127,7 +138,7 @@ into an existing ODF `rook-ceph-tools` pod.
     mirrored cluster it flags **CRITICAL** if a default OperatorHub
     CatalogSource (`catalog_default_sources`) is still present, and
     **CRITICAL** for each operator whose InstallPlan or Subscription is
-    still bound to the old default catalog instead of a mirrored one. Writes `outputs/catalog_mirror_check.json` and
+    still bound to the old default catalog instead of a mirrored one. Writes `outputs/<cluster>/operators/catalog_mirror_check.json` and
     report section 14. See
     [Catalog mirror (IDMS/ICSP/ITMS) notes](#catalog-mirror-idmsicspitms-notes) below.
 
@@ -200,8 +211,7 @@ playbook doesn't shell out to `oc login`.
 
 ```bash
 ansible-playbook playbook.yml \
-  -e upgrade_target_version=4.17.14 \
-  -e report_output_dir=./reports
+  -e upgrade_target_version=4.17.14
 ```
 
 Useful flags:
@@ -435,12 +445,13 @@ the defaults (`odf_namespace: openshift-storage`,
 
 ## Cluster operators snapshot notes
 
-Unlike every other section, `outputs/cluster_operators_installed.json` (and
+Unlike every other section, `outputs/<cluster>/operators/cluster_operators_installed.json` (and
 its companion `.md`) is **not** a findings/severity report - it's a plain
 data dump for downstream tooling, in exactly this shape and no other keys:
 
 ```json
 {
+  "cluster_name": "nam-d3m-03-nvmmf",
   "cluster": { "current": "4.18.14", "target": "4.20.32", "channel": "EUS" },
   "operators": [
     { "name": "cluster-logging", "channel": "stable-6.2", "version": "6.2.0",
@@ -479,7 +490,7 @@ data dump for downstream tooling, in exactly this shape and no other keys:
 
 Set `cluster_operators_snapshot_enabled: false` to skip this section
 entirely, or `cluster_operators_output_dir` to write somewhere other than
-the default `outputs/` folder alongside `reports/`.
+the default per-cluster `outputs/<cluster>/operators/` folder.
 
 ## Catalog opm render notes
 
@@ -487,8 +498,8 @@ A follow-on to the snapshot above (task 89,
 `tasks/89_catalog_opm_render.yml`): for every `CatalogSource` an installed
 operator actually came from, write that catalog's own `opm render` output -
 filtered to just this cluster's installed packages - to its own
-`outputs/<catalog-image-name>_<tag>.json`, e.g.
-`outputs/redhat-operator-index_v4.20.json`:
+`outputs/<cluster>/operators/<catalog-image-name>_<tag>.json`, e.g.
+`outputs/<cluster>/operators/redhat-operator-index_v4.20.json`:
 
 ```json
 [
@@ -539,7 +550,7 @@ Requires `cluster_operators_snapshot_enabled: true` (task 88 must run first
 in the same play - task 89 asserts this explicitly rather than silently
 producing nothing). Set `catalog_render_enabled: false` to skip this section
 entirely, or `catalog_render_output_dir` to write somewhere other than
-`cluster_operators_output_dir` (which itself defaults to `outputs/`).
+`cluster_operators_output_dir` (which itself defaults to `outputs/<cluster>/operators/`).
 
 ## Catalog mirror (IDMS/ICSP/ITMS) notes
 
@@ -615,13 +626,14 @@ What the check reports:
   These cases are CRITICAL because they block the upgrade. OLM resolves
   those operators' updates from a catalog outside the mirror, so the bundles it
   picks may not be mirrored.
-- **`outputs/catalog_mirror_check.json`** contains only what an external
+- **`outputs/<cluster>/operators/catalog_mirror_check.json`** contains only what an external
   `opm` script needs to look up upgrade metadata: the installed operators,
   grouped by the catalog image to pull. The script can run `opm render`
   once per image:
 
   ```json
   {
+    "cluster_name": "nam-d3m-03-nvmmf",
     "cluster": {"current": "4.18.28", "target": "4.20", "channel": "eus",
                 "ocp_path": ["4.18", "4.19", "4.20"]},
     "operators": [
@@ -894,10 +906,10 @@ tasks/80_openshift_virtualization.yml
 tasks/85_acm.yml                   ACM hub health, managed-cluster inventory, cascade
 tasks/85a_acm_wait_msa_secret.yml    included per-cluster from 85_acm.yml
 tasks/87_odf.yml                   OpenShift Data Foundation (ODF) + Ceph/OSD checks
-tasks/88_cluster_operators_installed.yml   writes outputs/cluster_operators_installed.json + .md
-tasks/89_catalog_opm_render.yml    per-catalog opm render -> outputs/<catalog>_<tag>.json
+tasks/88_cluster_operators_installed.yml   writes outputs/<cluster>/operators/cluster_operators_installed.json + .md
+tasks/89_catalog_opm_render.yml    per-catalog opm render -> outputs/<cluster>/operators/<catalog>_<tag>.json
 tasks/89a_catalog_opm_render_one.yml included per catalog from 89
-tasks/89b_catalog_mirror_check.yml IDMS/ICSP/ITMS vs default catalogs and InstallPlans -> outputs/catalog_mirror_check.json
+tasks/89b_catalog_mirror_check.yml IDMS/ICSP/ITMS vs default catalogs and InstallPlans -> outputs/<cluster>/operators/catalog_mirror_check.json
 tasks/90_render_report.yml         renders templates, fails on CRITICAL
 filter_plugins/ocp_health_filters.py   all the report-building logic (unit tested)
 templates/report.md.j2 / report.html.j2 / report_summary.html.j2
@@ -911,7 +923,7 @@ This project is a git repository (`git log` to see its history). Every
 change from the point git was initialized onward gets its own commit with a
 real diff - `git log -p`, `git diff <rev>..<rev>`, or `git blame` on any file
 show exactly what changed and (in the commit message) why. `.gitignore`
-excludes everything generated by a run (`reports/`, the ACM cascade's
+excludes everything generated by a run (`outputs/`, the ACM cascade's
 `.acm-cascade-scratch/` credential scratch dir, `tests/preview_out/`,
 `__pycache__/`, `*.pyc`) so only the actual project source is tracked.
 
