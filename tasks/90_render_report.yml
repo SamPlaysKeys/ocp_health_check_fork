@@ -1,4 +1,13 @@
 ---
+# Created here, not in 00_facts: the folder is named after the cluster,
+# which isn't known until ClusterVersion/Infrastructure have been read.
+- name: Ensure report output directory exists
+  ansible.builtin.file:
+    path: "{{ report_output_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
 - name: Compute overall findings summary
   ansible.builtin.set_fact:
     critical_findings: "{{ findings | selectattr('severity', 'equalto', 'CRITICAL') | list }}"
@@ -42,7 +51,8 @@
     mode: "0644"
     content: "{{ {
         'cluster_id': cluster_id,
-        'cluster_name': cluster_name,
+        'cluster_name': cluster_folder,
+        'infrastructure_name': cluster_name,
         'current_version': current_version,
         'overall_status': overall_status,
         'critical_count': critical_findings | length,

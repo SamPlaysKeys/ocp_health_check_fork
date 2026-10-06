@@ -556,7 +556,7 @@ CEPH_STATUS_JSON_ERR = {
 
 CEPH_STATUS_EXEC_FAILED_PLACEHOLDER = "(ceph status exec failed or was skipped - review manually)"
 
-# ---- Cluster operators installed snapshot (outputs/cluster_operators_installed.json) ----
+# ---- Cluster operators installed snapshot (outputs/<cluster>/operators/cluster_operators_installed.json) ----
 # Covers: a normal Red Hat operator, a package subscribed twice in two
 # different namespaces with an identical channel+version (must consolidate
 # to one entry), a stuck Subscription with no installedCSV (must be
@@ -609,7 +609,7 @@ COSNAP_CATALOGSOURCES = [
     {"metadata": {"name": "community-operators", "namespace": "openshift-marketplace"}, "spec": {"image": "registry.redhat.io/redhat/community-operator-index:v4.20"}},
 ]
 
-# ---- Catalog opm render targeting (outputs/<catalog>_<tag>.json) ----
+# ---- Catalog opm render targeting (outputs/<cluster>/operators/<catalog>_<tag>.json) ----
 # One CatalogSource Pod running a file-based-config image (command +
 # separate args, `serve /configs`), and one running a legacy sqlite-style
 # image (single command list, no `args`, database path after `serve`) -

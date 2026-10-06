@@ -87,7 +87,7 @@
 
     - name: Write cluster_operators_installed.json
       ansible.builtin.copy:
-        content: "{{ cluster_operators_snapshot_data | to_nice_json }}\n"
+        content: "{{ ({'cluster_name': cluster_folder} | combine(cluster_operators_snapshot_data)) | to_nice_json }}\n"
         dest: "{{ cluster_operators_output_dir }}/cluster_operators_installed.json"
         mode: "0644"
 

@@ -1,10 +1,3 @@
-reports/*.md
-reports/*.html
-reports/*.status.json
-reports/**/*.md
-reports/**/*.html
-reports/**/*.status.json
-!reports/.gitkeep
 .acm-cascade-scratch/
 tests/preview_out/
 __pycache__/
@@ -12,6 +5,6 @@ __pycache__/
 .ansible/
 *.retry
 .python-version
-# Per-run data written by the playbook (operator snapshot, opm renders,
-# catalog mirror check) - cluster-specific, never committed.
+# Everything a run writes (outputs/<cluster>/reports/ and
+# outputs/<cluster>/operators/) - cluster-specific, never committed.
 outputs/

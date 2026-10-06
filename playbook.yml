@@ -121,14 +121,14 @@
           tags: [odf, storage]
       tags: [odf, storage]
 
-    - name: 88 - Cluster operators installed snapshot (outputs/cluster_operators_installed.json)
+    - name: 88 - Cluster operators installed snapshot (outputs/<cluster>/operators/cluster_operators_installed.json)
       ansible.builtin.include_tasks:
         file: tasks/88_cluster_operators_installed.yml
         apply:
           tags: [cluster_operators, olm]
       tags: [cluster_operators, olm]
 
-    - name: 89 - Per-catalog opm render (outputs/<catalog>_<tag>.json)
+    - name: 89 - Per-catalog opm render (outputs/<cluster>/operators/<catalog>_<tag>.json)
       ansible.builtin.include_tasks:
         file: tasks/89_catalog_opm_render.yml
         apply:

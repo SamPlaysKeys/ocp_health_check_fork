@@ -1817,6 +1817,18 @@ def catalog_max_ocp_findings(catalog_export: Dict[str, Any], ocp_path: List[str]
     return out
 
 
+def cluster_folder_name(infrastructure_name: Any, fallback: Any = "cluster") -> str:
+    """Cluster name for the per-cluster output folder and the JSON exports:
+    status.infrastructureName without the random '-xxxxx' suffix the
+    installer appends (5 characters; 6 accepted too), e.g.
+    'nam-d3m-03-nvmmf-x7k2p' -> 'nam-d3m-03-nvmmf'. Falls back to
+    `fallback` when the name is missing or 'unknown'. Never raises."""
+    name = str(infrastructure_name or "").strip()
+    if not name or name == "unknown":
+        return str(fallback or "cluster")
+    return re.sub(r"-[a-z0-9]{5,6}$", "", name) or name
+
+
 def catalog_export_cluster(current_version: Any, target_version: Any = "", upgrade_channel: Any = "") -> Dict[str, Any]:
     """The `cluster` block of catalog_mirror_check.json: which OCP releases
     the upgrade passes through, so a consumer knows which catalog versions
@@ -2325,6 +2337,7 @@ class FilterModule(object):
             "opm_render_filter": opm_render_filter,
             "catalog_mirror_report": catalog_mirror_report,
             "catalog_export_cluster": catalog_export_cluster,
+            "cluster_folder_name": cluster_folder_name,
             "catalog_max_ocp_findings": catalog_max_ocp_findings,
             "md_cell": md_cell,
         }
