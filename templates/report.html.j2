@@ -57,9 +57,12 @@
 </head>
 <body>
 {#- Severity tally for an accordion's summary line, e.g. "2 CRITICAL 5 OK",
-    so a collapsed section still shows whether it needs opening. -#}
+    so a collapsed section still shows whether it needs opening. Every
+    {{ }} in here must yield a str: ansible-core 2.19 joins a macro's
+    output pieces without converting them, so a bare int count fails with
+    "sequence item N: expected str instance, int found". -#}
 {% macro sev_counts(rows) -%}
-{% for s in ['CRITICAL', 'WARNING', 'INFO', 'OK'] %}{% set n = rows | selectattr('severity', 'equalto', s) | list | length %}{% if n > 0 %}<span class="badge {{ s }}">{{ n }} {{ s }}</span>{% endif %}{% endfor %}
+{% for s in ['CRITICAL', 'WARNING', 'INFO', 'OK'] %}{% set n = rows | selectattr('severity', 'equalto', s) | list | length %}{% if n > 0 %}<span class="badge {{ s }}">{{ n ~ ' ' ~ s }}</span>{% endif %}{% endfor %}
 {%- endmacro %}
 <div class="wrap">
 
