@@ -25,10 +25,10 @@
 # openshift-challenging-client answers a basic-auth challenge with a 302
 # whose Location fragment carries the token; X-CSRF-Token is required by
 # the OAuth server for this client, any value works.
-- name: Log in to OpenShift as {{ ocp_username }} (OAuth token request)
+- name: Log in to OpenShift as {{ ocp_login_username }} (OAuth token request)
   ansible.builtin.uri:
     url: "{{ _ocp_oauth_meta.json.authorization_endpoint }}?response_type=token&client_id=openshift-challenging-client"
-    url_username: "{{ ocp_username }}"
+    url_username: "{{ ocp_login_username }}"
     url_password: "{{ ocp_password }}"
     force_basic_auth: true
     follow_redirects: none
@@ -47,7 +47,7 @@
       - _ocp_oauth_authorize.status == 302
       - (_ocp_oauth_authorize.location | default('')) is search('access_token=')
     fail_msg: >-
-      OpenShift login as {{ ocp_username }} at {{ ocp_api_host }} failed
+      OpenShift login as {{ ocp_login_username }} at {{ ocp_api_host }} failed
       (HTTP {{ _ocp_oauth_authorize.status }}): check the username and password -
       a short-lived password may have expired.
     quiet: true

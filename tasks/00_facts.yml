@@ -52,10 +52,10 @@
     that:
       - ocp_auth_method in ['kubeconfig', 'token', 'password']
       - (ocp_auth_method != 'token') or (ocp_api_host | length > 0 and ocp_api_token | length > 0)
-      - (ocp_auth_method != 'password') or (ocp_api_host | length > 0 and ocp_username | length > 0 and ocp_password | length > 0)
+      - (ocp_auth_method != 'password') or (ocp_api_host | length > 0 and ocp_login_username | length > 0 and ocp_password | length > 0)
     fail_msg: >-
       ocp_auth_method={{ ocp_auth_method }} is missing its required variables.
-      token needs ocp_api_host + ocp_api_token; password needs ocp_api_host + ocp_username + ocp_password;
+      token needs ocp_api_host + ocp_api_token; password needs ocp_api_host + ocp_username (or an AAP launch) + ocp_password;
       kubeconfig needs ocp_kubeconfig to point at a readable file.
     quiet: true
 
