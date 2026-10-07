@@ -14,7 +14,7 @@ Everything a run writes goes into one folder per cluster,
 `reports/` holds these reports plus `*.status.json`, and `operators/` holds
 the operator and catalog outputs described below. `<cluster>`
 is the cluster's `status.infrastructureName` without the random suffix the
-installer appends (`nam-d3m-03-nvmmf-x7k2p` -> `nam-d3m-03-nvmmf`), or the
+installer appends (`example-01-abcde-x7k2p` -> `example-01-abcde`), or the
 short cluster ID when the name can't be read. The JSON outputs
 (`cluster_operators_installed.json`, `catalog_mirror_check.json`,
 `*.status.json`) carry the same value as a top-level `"cluster_name"`.
@@ -463,7 +463,7 @@ data dump for downstream tooling, in exactly this shape and no other keys:
 
 ```json
 {
-  "cluster_name": "nam-d3m-03-nvmmf",
+  "cluster_name": "example-01-abcde",
   "cluster": { "current": "4.18.14", "target": "4.20.32", "channel": "EUS" },
   "operators": [
     { "name": "cluster-logging", "channel": "stable-6.2", "version": "6.2.0",
@@ -645,7 +645,7 @@ What the check reports:
 
   ```json
   {
-    "cluster_name": "nam-d3m-03-nvmmf",
+    "cluster_name": "example-01-abcde",
     "cluster": {"current": "4.18.14", "target": "4.20.34", "channel": "eus",
                 "ocp_path": ["4.18", "4.19", "4.20"],
                 "upgrade_path": ["4.18.14", "4.18.30", "4.19.33", "4.20.34"]},

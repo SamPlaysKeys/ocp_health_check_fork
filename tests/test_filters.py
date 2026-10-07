@@ -554,7 +554,7 @@ check("ITMS-redirected catalog: pull_image is rewritten to the mirror location, 
       _rh["pull_image"] == "mirror.local:5000/olm/redhat/redhat-operator-index:v4.20" and _rh["pulled_from"] == "ITMS")
 check("_mirror_rewrite swaps a wildcard source's host only", f._mirror_rewrite("a.quay.io/acme/idx:v1", "*.quay.io", "mirror.local:5000/quay") == "mirror.local:5000/quay/acme/idx:v1")
 
-# ---- sub-operator detection + catalog_export (shapes taken from ocp5) ----
+# ---- sub-operator detection + catalog_export (shapes taken from a lab cluster) ----
 so = f.catalog_mirror_report([], [], [], fx.SUBOP_CATALOGSOURCES, fx.SUBOP_SUBSCRIPTIONS, fx.SUBOP_INSTALLPLANS, csvs=fx.SUBOP_CSVS,
                              suboperator_parents={"multicluster-engine": ["advanced-cluster-management"]})
 so_pkgs = {p["name"]: p for c in so["catalogs"] for p in c["packages"]}
@@ -627,9 +627,9 @@ check("catalog_max_ocp_findings tolerates an empty export/path", f.catalog_max_o
 
 # ---- Per-cluster output folder -------------------------------------------------
 check("cluster_folder_name strips the installer's random suffix",
-      f.cluster_folder_name("nam-d3m-03-nvmmf-x7k2p") == "nam-d3m-03-nvmmf" and f.cluster_folder_name("ocp5-a1b2c3") == "ocp5")
+      f.cluster_folder_name("example-01-abcde-x7k2p") == "example-01-abcde" and f.cluster_folder_name("lab1-a1b2c3") == "lab1")
 check("cluster_folder_name keeps a name without a 5-6 char suffix",
-      f.cluster_folder_name("ocp5") == "ocp5" and f.cluster_folder_name("prod-east-1234567") == "prod-east-1234567")
+      f.cluster_folder_name("lab1") == "lab1" and f.cluster_folder_name("prod-east-1234567") == "prod-east-1234567")
 check("cluster_folder_name falls back when the name is unknown/empty",
       f.cluster_folder_name("unknown", "f80e7e4a") == "f80e7e4a" and f.cluster_folder_name(None) == "cluster")
 

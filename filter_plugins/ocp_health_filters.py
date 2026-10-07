@@ -1832,7 +1832,7 @@ def cluster_folder_name(infrastructure_name: Any, fallback: Any = "cluster") -> 
     """Cluster name for the per-cluster output folder and the JSON exports:
     status.infrastructureName without the random '-xxxxx' suffix the
     installer appends (5 characters; 6 accepted too), e.g.
-    'nam-d3m-03-nvmmf-x7k2p' -> 'nam-d3m-03-nvmmf'. Falls back to
+    'example-01-abcde-x7k2p' -> 'example-01-abcde'. Falls back to
     `fallback` when the name is missing or 'unknown'. Never raises."""
     name = str(infrastructure_name or "").strip()
     if not name or name == "unknown":
