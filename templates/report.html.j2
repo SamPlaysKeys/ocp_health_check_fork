@@ -44,6 +44,8 @@
   pre { background: var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; overflow-x:auto; white-space:pre-wrap; }
   details { background: var(--panel); border:1px solid var(--border); border-radius:10px; padding: 10px 14px; margin: 10px 0; }
   summary { cursor:pointer; font-weight:600; }
+  summary .badge { margin-left:6px; font-weight:600; }
+  details > .tblwrap, details > p.note { margin-top:10px; }
   .note { color: var(--muted); font-size:.88rem; }
   ul.checklist { list-style:none; padding-left:0; }
   ul.checklist li::before { content:"\2610\0020"; }
@@ -54,6 +56,11 @@
 </style>
 </head>
 <body>
+{#- Severity tally for an accordion's summary line, e.g. "2 CRITICAL 5 OK",
+    so a collapsed section still shows whether it needs opening. -#}
+{% macro sev_counts(rows) -%}
+{% for s in ['CRITICAL', 'WARNING', 'INFO', 'OK'] %}{% set n = rows | selectattr('severity', 'equalto', s) | list | length %}{% if n > 0 %}<span class="badge {{ s }}">{{ n }} {{ s }}</span>{% endif %}{% endfor %}
+{%- endmacro %}
 <div class="wrap">
 
   <h1>OpenShift Pre-Upgrade Health Check</h1>
@@ -107,12 +114,14 @@
   {% if critical_findings | length == 0 and warning_findings | length == 0 %}
   <p>No CRITICAL or WARNING findings. Cluster looks ready for upgrade based on the checks below.</p>
   {% else %}
+  <details><summary>CRITICAL and WARNING findings ({{ (critical_findings + warning_findings) | length }}) {{ sev_counts(critical_findings + warning_findings) }}</summary>
   <div class="tblwrap"><table>
     <tr><th>Severity</th><th>Section</th><th>Summary</th></tr>
     {% for f in critical_findings + warning_findings %}
     <tr><td><span class="badge {{ f.severity }}">{{ f.severity }}</span></td><td>{{ f.section }}</td><td>{{ f.summary }}</td></tr>
     {% endfor %}
   </table></div>
+  </details>
   {% endif %}
   {% if info_findings | length > 0 %}
   <details><summary>INFO findings ({{ info_findings | length }})</summary>
@@ -196,6 +205,7 @@
   </ul>
 
   <h2>4. Node &lt;-&gt; MachineConfigPool render matrix</h2>
+  <details><summary>Nodes ({{ node_mcp_matrix_report | length }}) {{ sev_counts(node_mcp_matrix_report) }}</summary>
   <div class="tblwrap"><table>
     <tr><th>Node</th><th>Roles</th><th>Ready</th><th>Pool</th><th>Node current</th><th>Node desired</th><th>Pool rendered</th><th>Status</th></tr>
     {% for n in node_mcp_matrix_report %}
@@ -204,8 +214,10 @@
       <td><span class="badge {{ n.severity }}">{{ n.status }}</span></td></tr>
     {% endfor %}
   </table></div>
+  </details>
 
   <h2>5. ClusterOperators</h2>
+  <details><summary>ClusterOperators ({{ co_report_data | length }}) {{ sev_counts(co_report_data) }}</summary>
   <div class="tblwrap"><table>
     <tr><th>Operator</th><th>Version</th><th>Available</th><th>Progressing</th><th>Degraded</th><th>Upgradeable</th><th>Status</th></tr>
     {% for co in co_report_data %}
@@ -213,6 +225,7 @@
       <td><span class="badge {{ co.severity }}">{{ co.severity }}</span></td></tr>
     {% endfor %}
   </table></div>
+  </details>
 
   <h2>6. MachineConfigPools</h2>
   <div class="tblwrap"><table>
@@ -266,12 +279,14 @@
   {% if stuck_rows | length == 0 %}
   <p class="note">No resources found stuck Terminating.</p>
   {% else %}
+  <details><summary>Stuck resources ({{ stuck_rows | length }}) {{ sev_counts(stuck_rows) }}</summary>
   <div class="tblwrap"><table>
     <tr><th>Kind</th><th>Namespace/Name</th><th>Terminating for</th><th>Finalizers</th><th>CRD</th></tr>
     {% for r in stuck_rows %}
     <tr><td>{{ r.kind }}</td><td>{{ (r.namespace ~ '/') if r.namespace else '' }}{{ r.name }}</td><td><span class="badge CRITICAL">{{ r.age_human }}</span></td><td>{{ r.finalizers | join(', ') }}</td><td>{{ r.crd }}</td></tr>
     {% endfor %}
   </table></div>
+  </details>
   {% endif %}
 
   <h2>10. Portworx</h2>
@@ -286,12 +301,14 @@
     <div>Image</div><div><code>{{ px_image }}</code></div>
     <div>StorageNodes</div><div>{{ px_storagenodes | length }} reporting</div>
   </div>
+  <details><summary>StorageNodes ({{ px_storagenodes | length }})</summary>
   <div class="tblwrap"><table>
     <tr><th>StorageNode</th><th>Status</th></tr>
     {% for sn in px_storagenodes %}
     <tr><td>{{ sn.metadata.name }}</td><td>{{ sn.status.phase | default(sn.status.status) | default('Unknown') }}</td></tr>
     {% endfor %}
   </table></div>
+  </details>
 
   <details><summary>pxctl status (raw, best-effort)</summary><pre>{{ pxctl_status_output }}</pre></details>
   <details><summary>pxctl license list (raw, best-effort)</summary><pre>{{ pxctl_license_output }}</pre></details>
@@ -309,6 +326,7 @@
   <p class="note">No HyperConverged CR found in namespace <code>{{ cnv_namespace }}</code>.</p>
   {% else %}
   <h3>Component health</h3>
+  <details><summary>Components ({{ cnv_component_report | length }}) {{ sev_counts(cnv_component_report) }}</summary>
   <div class="tblwrap"><table>
     <tr><th>Component</th><th>Version</th><th>Available</th><th>Progressing</th><th>Degraded</th><th>Upgradeable</th><th>Status</th></tr>
     {% for c in cnv_component_report %}
@@ -316,6 +334,7 @@
       <td><span class="badge {{ c.severity }}">{{ c.severity }}</span></td></tr>
     {% endfor %}
   </table></div>
+  </details>
   <p class="note" style="margin-top:10px;">Outdated VMI workloads (still on an old virt-launcher): <b>{{ kv_outdated_count }}</b> &middot; workloadUpdateMethods: <code>{{ kv_update_methods }}</code></p>
 
   <h3 style="margin-top:24px;">VM node-drain readiness</h3>
@@ -323,6 +342,7 @@
   {% if vmi_migration_report_data | length == 0 %}
   <p class="note">No VirtualMachineInstances found.</p>
   {% else %}
+  <details><summary>VirtualMachineInstances ({{ vmi_migration_report_data | length }}) {{ sev_counts(vmi_migration_report_data) }}</summary>
   <div class="tblwrap"><table>
     <tr><th>Namespace/Name</th><th>Node</th><th>Phase</th><th>Eviction strategy</th><th>Live migratable</th><th>CD-ROM disks</th><th>Status</th></tr>
     {% for v in vmi_migration_report_data %}
@@ -330,9 +350,15 @@
       <td><span class="badge {{ v.severity }}">{{ v.severity }}</span></td></tr>
     {% endfor %}
   </table></div>
-  {% for v in vmi_migration_report_data if v.severity in ['CRITICAL', 'WARNING'] %}
-  <p class="note"><b>{{ v.namespace }}/{{ v.name }}</b>: {{ v.reasons | join('; ') }}</p>
+  </details>
+  {% set vmi_flagged = vmi_migration_report_data | selectattr('severity', 'in', ['CRITICAL', 'WARNING']) | list %}
+  {% if vmi_flagged | length > 0 %}
+  <details><summary>Why VMs were flagged ({{ vmi_flagged | length }}) {{ sev_counts(vmi_flagged) }}</summary>
+  {% for v in vmi_flagged %}
+  <p class="note"><span class="badge {{ v.severity }}">{{ v.severity }}</span> <b>{{ v.namespace }}/{{ v.name }}</b>: {{ v.reasons | join('; ') }}</p>
   {% endfor %}
+  </details>
+  {% endif %}
   {% endif %}
 
   <h3 style="margin-top:20px;">Manual checklist (verify before upgrading)</h3>
@@ -518,6 +544,7 @@
   {% if catalog_mirror_data.operators | length == 0 %}
   <p class="note">No OLM Subscriptions found.</p>
   {% else %}
+  <details><summary>Operators ({{ catalog_mirror_data.operators | length }}) {{ sev_counts(catalog_mirror_data.operators) }}</summary>
   <div class="tblwrap"><table>
     <tr><th>Operator</th><th>Namespace</th><th>Subscription source</th><th>InstallPlan</th><th>InstallPlan catalog</th><th>Catalog kind</th><th>Status</th></tr>
     {% for o in catalog_mirror_data.operators %}
@@ -526,9 +553,15 @@
       <td><span class="badge {{ o.severity }}">{{ o.severity }}</span></td></tr>
     {% endfor %}
   </table></div>
-  {% for o in catalog_mirror_data.operators if o.message %}
-  <p class="note"><b>{{ o.package }}</b> ({{ o.namespace }}): {{ o.message }}</p>
+  </details>
+  {% set op_notes = catalog_mirror_data.operators | selectattr('message') | list %}
+  {% if op_notes | length > 0 %}
+  <details><summary>Operator notes ({{ op_notes | length }}) {{ sev_counts(op_notes) }}</summary>
+  {% for o in op_notes %}
+  <p class="note"><span class="badge {{ o.severity }}">{{ o.severity }}</span> <b>{{ o.package }}</b> ({{ o.namespace }}): {{ o.message }}</p>
   {% endfor %}
+  </details>
+  {% endif %}
   {% endif %}
   {% endif %}
 
