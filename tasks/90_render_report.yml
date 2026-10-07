@@ -27,6 +27,21 @@
     mode: "0644"
   delegate_to: localhost
 
+# slurp returns the files base64-encoded, which is what the report's
+# @font-face data: URLs need. A missing font file only costs the look:
+# the report falls back to system fonts.
+- name: Read the Red Hat fonts the HTML report embeds (templates/fonts/)
+  ansible.builtin.slurp:
+    src: "{{ playbook_dir }}/templates/fonts/{{ item }}.woff2"
+  loop: [RedHatDisplayVF, RedHatTextVF, RedHatMonoVF]
+  register: _report_fonts_raw
+  ignore_errors: true
+  delegate_to: localhost
+
+- name: Collect the embedded fonts by name
+  ansible.builtin.set_fact:
+    report_fonts: "{{ _report_fonts_raw.results | selectattr('content', 'defined') | items2dict(key_name='item', value_name='content') }}"
+
 - name: Render full HTML report (open in any browser)
   ansible.builtin.template:
     src: report.html.j2

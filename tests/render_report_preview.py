@@ -3,6 +3,7 @@
 needed) so template typos/undefined-var bugs surface before the playbook
 ever runs against a real cluster. Writes previews to tests/preview_out/.
 """
+import base64
 import json
 import os
 import re
@@ -228,6 +229,13 @@ for row in catalog_mirror_data["findings"]:
 cluster_operators_snapshot_data = f.cluster_operators_snapshot(
     fx.COSNAP_SUBSCRIPTIONS, fx.COSNAP_CSVS, fx.COSNAP_CATALOGSOURCES, "4.18.14", "4.20.32", "eus-4.20",
 )
+
+# Same as tasks/90_render_report.yml's slurp: base64 of each embedded font.
+FONTS_DIR = os.path.join(TEMPLATES_DIR, "fonts")
+context["report_fonts"] = {
+    name: base64.b64encode(open(os.path.join(FONTS_DIR, name + ".woff2"), "rb").read()).decode()
+    for name in ("RedHatDisplayVF", "RedHatTextVF", "RedHatMonoVF")
+}
 
 critical_findings = [x for x in findings if x["severity"] == "CRITICAL"]
 warning_findings = [x for x in findings if x["severity"] == "WARNING"]
