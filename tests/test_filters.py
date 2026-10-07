@@ -596,6 +596,17 @@ check("explicit major.minor target is accepted", f.catalog_export_cluster("4.18.
 check("target not newer than current -> error, not a crash", "error" in f.catalog_export_cluster("4.18.28", "4.18.30"))
 check("unparseable current version -> error, not a crash", "error" in f.catalog_export_cluster(""))
 
+# ---- ocp_oauth_token_name ------------------------------------------------------
+# Expected value computed independently: sha256 of the part after "sha256~",
+# base64url without padding (how oc and redhat.openshift.openshift_auth name it).
+import base64 as _b64, hashlib as _hl
+_tok = "sha256~abcDEF123_-xyz"
+_want = "sha256~" + _b64.urlsafe_b64encode(_hl.sha256(b"abcDEF123_-xyz").digest()).decode().rstrip("=")
+check("sha256~ token -> sha256~ + unpadded base64url SHA-256 of the secret", f.ocp_oauth_token_name(_tok) == _want)
+check("token object name never contains the token secret", "abcDEF123" not in f.ocp_oauth_token_name(_tok))
+check("pre-4.6 token without the prefix is its own object name", f.ocp_oauth_token_name("oldstyletoken") == "oldstyletoken")
+check("empty token -> empty name, not a crash", f.ocp_oauth_token_name(None) == "")
+
 # ---- maxOpenShiftVersion -------------------------------------------------------
 _mx_csv = lambda v: {"metadata": {"annotations": {"olm.properties": json.dumps([{"type": "olm.maxOpenShiftVersion", "value": v}])}}}
 check("_csv_max_ocp reads olm.properties and normalises to major.minor", f._csv_max_ocp(_mx_csv("4.19")) == "4.19" and f._csv_max_ocp(_mx_csv("4.18.0")) == "4.18")

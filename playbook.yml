@@ -30,121 +30,133 @@
   # tags on a dynamic include only select the include itself, so without
   # `apply` a --tags run loads each file and then skips every task in it.
   tasks:
-    - name: 00 - connection setup and shared facts
-      ansible.builtin.include_tasks:
-        file: tasks/00_facts.yml
-        apply:
+    # One block so `always:` logs out (revokes the OAuth token of
+    # ocp_auth_method=password) even when a section fails.
+    - name: Pre-upgrade health check
+      block:
+        - name: 00 - connection setup and shared facts
+          ansible.builtin.include_tasks:
+            file: tasks/00_facts.yml
+            apply:
+              tags: [facts, always]
           tags: [facts, always]
-      tags: [facts, always]
 
-    - name: 10 - ClusterVersion (identity, current version, update graph)
-      ansible.builtin.include_tasks:
-        file: tasks/10_clusterversion.yml
-        apply:
+        - name: 10 - ClusterVersion (identity, current version, update graph)
+          ansible.builtin.include_tasks:
+            file: tasks/10_clusterversion.yml
+            apply:
+              tags: [clusterversion]
           tags: [clusterversion]
-      tags: [clusterversion]
 
-    - name: 15 - etcd cluster health
-      ansible.builtin.include_tasks:
-        file: tasks/15_etcd_health.yml
-        apply:
+        - name: 15 - etcd cluster health
+          ansible.builtin.include_tasks:
+            file: tasks/15_etcd_health.yml
+            apply:
+              tags: [etcd]
           tags: [etcd]
-      tags: [etcd]
 
-    - name: 20 - Node <-> MachineConfigPool render matrix
-      ansible.builtin.include_tasks:
-        file: tasks/20_nodes_mcp_matrix.yml
-        apply:
+        - name: 20 - Node <-> MachineConfigPool render matrix
+          ansible.builtin.include_tasks:
+            file: tasks/20_nodes_mcp_matrix.yml
+            apply:
+              tags: [nodes, mcp]
           tags: [nodes, mcp]
-      tags: [nodes, mcp]
 
-    - name: 30 - ClusterOperators
-      ansible.builtin.include_tasks:
-        file: tasks/30_clusteroperators.yml
-        apply:
+        - name: 30 - ClusterOperators
+          ansible.builtin.include_tasks:
+            file: tasks/30_clusteroperators.yml
+            apply:
+              tags: [clusteroperators]
           tags: [clusteroperators]
-      tags: [clusteroperators]
 
-    - name: 40 - MachineConfigPool status/counts
-      ansible.builtin.include_tasks:
-        file: tasks/40_machineconfigpools.yml
-        apply:
+        - name: 40 - MachineConfigPool status/counts
+          ansible.builtin.include_tasks:
+            file: tasks/40_machineconfigpools.yml
+            apply:
+              tags: [mcp]
           tags: [mcp]
-      tags: [mcp]
 
-    - name: 50 - MachineSets vs Machines
-      ansible.builtin.include_tasks:
-        file: tasks/50_machinesets.yml
-        apply:
+        - name: 50 - MachineSets vs Machines
+          ansible.builtin.include_tasks:
+            file: tasks/50_machinesets.yml
+            apply:
+              tags: [machinesets]
           tags: [machinesets]
-      tags: [machinesets]
 
-    - name: 60 - Deprecated/removed API usage per namespace
-      ansible.builtin.include_tasks:
-        file: tasks/60_deprecated_apis.yml
-        apply:
+        - name: 60 - Deprecated/removed API usage per namespace
+          ansible.builtin.include_tasks:
+            file: tasks/60_deprecated_apis.yml
+            apply:
+              tags: [deprecated_apis]
           tags: [deprecated_apis]
-      tags: [deprecated_apis]
 
-    - name: 65 - Resources stuck Terminating on a finalizer
-      ansible.builtin.include_tasks:
-        file: tasks/65_stuck_finalizers.yml
-        apply:
+        - name: 65 - Resources stuck Terminating on a finalizer
+          ansible.builtin.include_tasks:
+            file: tasks/65_stuck_finalizers.yml
+            apply:
+              tags: [finalizers]
           tags: [finalizers]
-      tags: [finalizers]
 
-    - name: 70 - Portworx storage layer checks
-      ansible.builtin.include_tasks:
-        file: tasks/70_portworx.yml
-        apply:
+        - name: 70 - Portworx storage layer checks
+          ansible.builtin.include_tasks:
+            file: tasks/70_portworx.yml
+            apply:
+              tags: [portworx]
           tags: [portworx]
-      tags: [portworx]
 
-    - name: 80 - OpenShift Virtualization (CNV/KubeVirt) checks
-      ansible.builtin.include_tasks:
-        file: tasks/80_openshift_virtualization.yml
-        apply:
+        - name: 80 - OpenShift Virtualization (CNV/KubeVirt) checks
+          ansible.builtin.include_tasks:
+            file: tasks/80_openshift_virtualization.yml
+            apply:
+              tags: [virtualization, cnv]
           tags: [virtualization, cnv]
-      tags: [virtualization, cnv]
 
-    - name: 85 - Advanced Cluster Management (ACM) hub health, managed-cluster inventory, and cascade
-      ansible.builtin.include_tasks:
-        file: tasks/85_acm.yml
-        apply:
+        - name: 85 - Advanced Cluster Management (ACM) hub health, managed-cluster inventory, and cascade
+          ansible.builtin.include_tasks:
+            file: tasks/85_acm.yml
+            apply:
+              tags: [acm]
           tags: [acm]
-      tags: [acm]
 
-    - name: 87 - OpenShift Data Foundation (ODF/OCS) + Ceph storage checks
-      ansible.builtin.include_tasks:
-        file: tasks/87_odf.yml
-        apply:
+        - name: 87 - OpenShift Data Foundation (ODF/OCS) + Ceph storage checks
+          ansible.builtin.include_tasks:
+            file: tasks/87_odf.yml
+            apply:
+              tags: [odf, storage]
           tags: [odf, storage]
-      tags: [odf, storage]
 
-    - name: 88 - Cluster operators installed snapshot (outputs/<cluster>/operators/cluster_operators_installed.json)
-      ansible.builtin.include_tasks:
-        file: tasks/88_cluster_operators_installed.yml
-        apply:
+        - name: 88 - Cluster operators installed snapshot (outputs/<cluster>/operators/cluster_operators_installed.json)
+          ansible.builtin.include_tasks:
+            file: tasks/88_cluster_operators_installed.yml
+            apply:
+              tags: [cluster_operators, olm]
           tags: [cluster_operators, olm]
-      tags: [cluster_operators, olm]
 
-    - name: 89 - Per-catalog opm render (outputs/<cluster>/operators/<catalog>_<tag>.json)
-      ansible.builtin.include_tasks:
-        file: tasks/89_catalog_opm_render.yml
-        apply:
+        - name: 89 - Per-catalog opm render (outputs/<cluster>/operators/<catalog>_<tag>.json)
+          ansible.builtin.include_tasks:
+            file: tasks/89_catalog_opm_render.yml
+            apply:
+              tags: [cluster_operators, olm, opm_render]
           tags: [cluster_operators, olm, opm_render]
-      tags: [cluster_operators, olm, opm_render]
 
-    - name: 89b - Catalog mirror (IDMS/ICSP/ITMS) check - default sources disabled, InstallPlans from mirrored catalogs
-      ansible.builtin.include_tasks:
-        file: tasks/89b_catalog_mirror_check.yml
-        apply:
+        - name: 89b - Catalog mirror (IDMS/ICSP/ITMS) check - default sources disabled, InstallPlans from mirrored catalogs
+          ansible.builtin.include_tasks:
+            file: tasks/89b_catalog_mirror_check.yml
+            apply:
+              tags: [cluster_operators, olm, catalog_mirror]
           tags: [cluster_operators, olm, catalog_mirror]
-      tags: [cluster_operators, olm, catalog_mirror]
 
-    - name: 90 - Render reports and evaluate overall readiness
-      ansible.builtin.include_tasks:
-        file: tasks/90_render_report.yml
-        apply:
+        - name: 90 - Render reports and evaluate overall readiness
+          ansible.builtin.include_tasks:
+            file: tasks/90_render_report.yml
+            apply:
+              tags: [report, always]
           tags: [report, always]
-      tags: [report, always]
+      always:
+        - name: 99 - log out of OpenShift (password method's OAuth token)
+          ansible.builtin.include_tasks:
+            file: tasks/99_oauth_logout.yml
+            apply:
+              tags: [always]
+          when: ocp_auth_method == 'password'
+          tags: [always]

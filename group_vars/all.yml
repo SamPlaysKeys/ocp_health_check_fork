@@ -19,9 +19,12 @@ ocp_context: ""                     # optional: a specific context name inside t
 ocp_api_host: ""                    # e.g. https://api.mycluster.example.com:6443
 ocp_api_token: ""                   # pass with -e ocp_api_token=... or via vault, do not commit
 
-# --- username/password method (basic auth / htpasswd identity provider) -----
+# --- username/password method (any OpenShift identity provider: LDAP, htpasswd, ...)
+# Exchanged once for an OAuth token (tasks/01_oauth_login.yml), revoked at the
+# end of the run. In AAP pass ocp_password from a Password survey field; on the
+# command line export OCP_PASSWORD instead of -e, which shows in `ps`.
 ocp_username: ""
-ocp_password: ""
+ocp_password: "{{ lookup('env', 'OCP_PASSWORD') }}"
 
 # --- shared TLS options -------------------------------------------------------
 ocp_validate_certs: true

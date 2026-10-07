@@ -9,6 +9,7 @@ kubernetes.core.k8s_info, so they can be unit tested outside of Ansible too
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -1839,6 +1840,20 @@ def cluster_folder_name(infrastructure_name: Any, fallback: Any = "cluster") -> 
     return re.sub(r"-[a-z0-9]{5,6}$", "", name) or name
 
 
+def ocp_oauth_token_name(token: Any) -> str:
+    """Name of the OAuthAccessToken/UserOAuthAccessToken object for an
+    OpenShift access token, used to revoke it. OpenShift 4.6+ tokens look
+    like 'sha256~<secret>' and their object is named 'sha256~' plus the
+    unpadded base64url SHA-256 of <secret>, so the API path never carries
+    the token itself. Older tokens are their own object name."""
+    token = str(token or "")
+    prefix = "sha256~"
+    if not token.startswith(prefix):
+        return token
+    digest = hashlib.sha256(token[len(prefix):].encode()).digest()
+    return prefix + base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
 def catalog_export_cluster(
     current_version: Any, target_version: Any = "", upgrade_channel: Any = "", upgrade_hops: Any = None
 ) -> Dict[str, Any]:
@@ -2357,6 +2372,7 @@ class FilterModule(object):
             "opm_render_filter": opm_render_filter,
             "catalog_mirror_report": catalog_mirror_report,
             "catalog_export_cluster": catalog_export_cluster,
+            "ocp_oauth_token_name": ocp_oauth_token_name,
             "cluster_folder_name": cluster_folder_name,
             "catalog_max_ocp_findings": catalog_max_ocp_findings,
             "md_cell": md_cell,

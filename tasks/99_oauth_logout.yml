@@ -1,0 +1,30 @@
+---
+# Revoke the OAuth token tasks/01_oauth_login.yml created, so it doesn't
+# stay valid until it expires. Runs from playbook.yml's `always:`, so a
+# failed run logs out too. A user deletes their own token through
+# useroauthaccesstokens (OpenShift 4.6+); the object's name is the
+# token's SHA-256, never the token itself (ocp_oauth_token_name filter).
+# Best-effort: a failed logout is reported, never fails the play.
+- name: Log out of OpenShift (revoke this run's OAuth token)
+  ansible.builtin.uri:
+    url: "{{ ocp_api_host | regex_replace('/+$', '') }}/apis/oauth.openshift.io/v1/useroauthaccesstokens/{{ ocp_oauth_token | ocp_oauth_token_name }}"
+    method: DELETE
+    headers:
+      Authorization: "Bearer {{ ocp_oauth_token }}"
+    validate_certs: "{{ ocp_validate_certs }}"
+    ca_path: "{{ ocp_ca_cert if ocp_ca_cert | length > 0 else omit }}"
+    status_code: [200, 202, 404]
+  register: _ocp_oauth_logout
+  no_log: true
+  ignore_errors: true
+  delegate_to: localhost
+  when: ocp_oauth_token | default('') | length > 0
+
+- name: Report a failed logout (the token stays valid until it expires)
+  ansible.builtin.debug:
+    msg: >-
+      Could not revoke this run's OAuth token (HTTP {{ _ocp_oauth_logout.status | default('n/a') }});
+      it expires on its own (the cluster's OAuth token max age).
+  when:
+    - ocp_oauth_token | default('') | length > 0
+    - _ocp_oauth_logout is failed
