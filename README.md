@@ -151,9 +151,9 @@ a CI/pipeline job before it starts the real upgrade.
 
 ```bash
 python3 -m venv ~/venv-ocp && source ~/venv-ocp/bin/activate   # Python 3.10+
-pip install -r requirements.txt          # ansible-core>=2.16, kubernetes, websocket-client
+pip install -r requirements.txt          # ansible-core>=2.16, jinja2>=3.1, kubernetes, websocket-client
 ansible-galaxy collection install -r requirements.yml
-ansible --version                        # should show core 2.16+ and the venv's Python
+ansible --version                        # should show core 2.16+, jinja 3.1+ and the venv's Python
 ```
 
 Use **`ansible-core >= 2.16`** (needs **Python 3.10+**), the version current
@@ -883,7 +883,8 @@ starting point, not a guarantee.
 
 ```bash
 python3 tests/test_filters.py            # unit tests for the report-building logic
-python3 tests/render_report_preview.py   # renders all 3 templates with synthetic data -> tests/preview_out/
+python3 tests/render_report_preview.py   # renders the templates with synthetic data -> tests/preview_out/,
+                                         # then again through ansible-playbook when it is installed
 ```
 
 Both use the fixtures in `tests/fixtures.py` (synthetic but realistic

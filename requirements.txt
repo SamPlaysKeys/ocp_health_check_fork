@@ -3,6 +3,11 @@
 # ansible-core 2.16+ (needs Python 3.10+) is what current kubernetes.core
 # releases support; 2.12 is the oldest the playbook accepts (tasks/00_facts.yml).
 ansible-core>=2.16
+# Jinja2 3.1+: ansible-core accepts 3.0, but on 3.0.x its templating is
+# stricter in ways the report templates don't rely on (e.g. a bare int in
+# a macro). A --user or system install can otherwise pick up an older
+# distro Jinja2. Same pairing for a custom AAP execution environment.
+jinja2>=3.1
 kubernetes>=27.2.0
 websocket-client>=1.6.0
 PyYAML>=6.0
