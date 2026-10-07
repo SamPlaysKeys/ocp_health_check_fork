@@ -3,8 +3,13 @@
 needed) so template typos/undefined-var bugs surface before the playbook
 ever runs against a real cluster. Writes previews to tests/preview_out/.
 """
+import json
 import os
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "filter_plugins"))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -243,13 +248,15 @@ env = jinja2.Environment(
 # Ansible's template module auto-registers filter_plugins/*.py; plain jinja2 doesn't, so wire it up here.
 env.filters["md_cell"] = f.md_cell
 
-errors = []
-for tpl_name, out_name in [
+TEMPLATES = [
     ("report.md.j2", "preview.md"),
     ("report.html.j2", "preview.html"),
     ("report_summary.html.j2", "preview.summary.html"),
     ("cluster_operators_installed.md.j2", "preview.cluster_operators_installed.md"),
-]:
+]
+
+errors = []
+for tpl_name, out_name in TEMPLATES:
     try:
         rendered = env.get_template(tpl_name).render(**context)
         with open(os.path.join(OUT_DIR, out_name), "w") as fh:
@@ -258,6 +265,56 @@ for tpl_name, out_name in [
     except Exception as exc:  # noqa: BLE001
         print(f"[FAIL] {tpl_name}: {exc}")
         errors.append(tpl_name)
+
+# Plain jinja2 is more forgiving than Ansible's templating - e.g. Ansible
+# joins a macro's output without str()-ing it, so a bare {{ int }} inside
+# a macro renders here but fails in the playbook with "sequence item N:
+# expected str instance, int found". So when ansible-playbook is installed
+# (pip install -r requirements.txt), render every template again through
+# the real template module, with the same synthetic data. How strict that
+# is depends on the Jinja2 under Ansible (3.0.x rejects the bare int, 3.1
+# lets it through), so run this with the same ansible-core + Jinja2 as the
+# environment that runs the playbook (e.g. the AAP execution environment).
+ansible_playbook = shutil.which("ansible-playbook")
+if not ansible_playbook:
+    print("[SKIP] ansible-playbook not found - Ansible render pass skipped (pip install -r requirements.txt)")
+else:
+    project_dir = os.path.abspath(os.path.join(HERE, ".."))
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "vars.json"), "w") as fh:
+            json.dump(context, fh, default=str)
+        with open(os.path.join(tmp, "render.yml"), "w") as fh:
+            fh.write(
+                "- hosts: localhost\n"
+                "  gather_facts: false\n"
+                "  tasks:\n"
+                "    - ansible.builtin.template:\n"
+                f"        src: {TEMPLATES_DIR}/{{{{ item }}}}\n"
+                f"        dest: {tmp}/{{{{ item }}}}.out\n"
+                "      loop: " + json.dumps([t for t, _ in TEMPLATES]) + "\n"
+                "      ignore_errors: true\n"
+                "      register: rendered\n"
+                "    - ansible.builtin.debug:\n"
+                "        msg: \"RENDER_FAILED {{ item.item }}: {{ (item.msg | default('')).split('): ')[-1] }}\"\n"
+                "      loop: \"{{ rendered.results | selectattr('failed', 'defined') | selectattr('failed') | list }}\"\n"
+            )
+        # cwd = project dir so ansible.cfg (filter_plugins, inventory) applies;
+        # stdin/stdout/stderr are pipes because ansible refuses non-blocking handles.
+        run = subprocess.run(
+            [ansible_playbook, os.path.join(tmp, "render.yml"), "-e", "@" + os.path.join(tmp, "vars.json")],
+            cwd=project_dir, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        )
+        failed = re.findall(r"RENDER_FAILED (\S+): (.*?)\"", run.stdout)
+        if run.returncode != 0 and not failed:
+            print(f"[FAIL] ansible-playbook exited {run.returncode}:\n{run.stdout[-2000:]}{run.stderr[-2000:]}")
+            errors.append("ansible render pass")
+        for tpl_name, _ in TEMPLATES:
+            msg = next((m for t, m in failed if t == tpl_name), None)
+            if msg is None:
+                print(f"[OK] rendered {tpl_name} through ansible-playbook")
+            else:
+                print(f"[FAIL] {tpl_name} through ansible-playbook: {msg}")
+                errors.append(tpl_name + " (ansible)")
 
 if errors:
     sys.exit(1)
