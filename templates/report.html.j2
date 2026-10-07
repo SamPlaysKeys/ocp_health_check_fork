@@ -5,53 +5,96 @@
 <title>OCP Pre-Upgrade Health Check - {{ cluster_id_short }}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
+  /* PatternFly 6 look (OpenShift console style), hand-picked from the
+     @patternfly/patternfly 6.6.1 tokens rather than its ~2MB stylesheet,
+     so the report stays one small self-contained file. Fonts are embedded
+     below when tasks/90_render_report.yml could read templates/fonts/;
+     otherwise the stacks fall back to system fonts. */
+{% for family, file in [('Red Hat Display', 'RedHatDisplayVF'), ('Red Hat Text', 'RedHatTextVF'), ('Red Hat Mono', 'RedHatMonoVF')] if file in (report_fonts | default({})) %}
+  @font-face { font-family: "{{ family }}"; src: url(data:font/woff2;base64,{{ report_fonts[file] }}) format("woff2"); font-weight: 300 900; font-style: normal; font-display: swap; }
+{% endfor %}
   :root {
-    --bg: #f7f8fa; --panel: #ffffff; --text: #1c2430; --muted: #5b6675; --border: #e2e6ec;
-    --ok: #1a7f37; --ok-bg: #e6f6ea;
-    --warn: #9a6700; --warn-bg: #fff6e5;
-    --crit: #b3261e; --crit-bg: #fdeceb;
-    --info: #385ac2; --info-bg: #eaf0fd;
-    --accent: #cc0000;
+    --font-body: "Red Hat Text", "RedHatText", Helvetica, Arial, sans-serif;
+    --font-heading: "Red Hat Display", "RedHatDisplay", Helvetica, Arial, sans-serif;
+    --font-mono: "Red Hat Mono", "RedHatMono", "Courier New", Courier, monospace;
+    --bg: #f2f2f2; --panel: #ffffff; --text: #151515; --muted: #4d4d4d;
+    --border: #c7c7c7; --border-subtle: #e0e0e0; --hover: rgba(199,199,199,.25);
+    --link: #0066cc; --brand: #0066cc; --masthead: #151515; --masthead-text: #ffffff; --accent: #ee0000;
+    --crit: #b1380b; --crit-bg: #ffe3d9; --crit-text: #731f00;
+    --warn: #dca614; --warn-bg: #fff4cc; --warn-text: #73480b;
+    --ok: #3d7317; --ok-bg: #e9f7df; --ok-text: #204d00;
+    --info: #5e40be; --info-bg: #ece6ff; --info-text: #3d2785;
+    --unknown-bg: #f2f2f2; --unknown-text: #4d4d4d;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#12151a; --panel:#1a1f27; --text:#e6e9ef; --muted:#9aa4b2; --border:#2b323d;
-      --ok:#5fd685; --ok-bg:#0f2a18; --warn:#f2c14e; --warn-bg:#332608; --crit:#ff8b82; --crit-bg:#3a1210;
-      --info:#8fb2ff; --info-bg:#131c33; }
+    :root {
+      --bg: #151515; --panel: #1f1f1f; --text: #ffffff; --muted: #c7c7c7;
+      --border: #4d4d4d; --border-subtle: #383838; --hover: rgba(199,199,199,.15);
+      --link: #92c5f9; --brand: #92c5f9; --masthead: #000000;
+      --crit: #f4784a; --crit-bg: #4c1405; --crit-text: #fbbea8;
+      --warn: #ffcc17; --warn-bg: #54330b; --warn-text: #ffe072;
+      --ok: #87bb62; --ok-bg: #183301; --ok-text: #d1f1bb;
+      --info: #b6a6e9; --info-bg: #21134d; --info-text: #d0c5f4;
+      --unknown-bg: #383838; --unknown-text: #e0e0e0;
+    }
   }
   * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height:1.5; }
-  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 60px; }
-  h1 { font-size: 1.5rem; margin: 0 0 4px; }
-  h2 { font-size: 1.15rem; margin: 36px 0 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
-  .sub { color: var(--muted); font-size: .9rem; margin-bottom: 20px; }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
-  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap: 14px; margin-bottom: 8px; }
-  .stat { background: var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
-  .stat .n { font-size: 1.6rem; font-weight:700; }
-  .stat .l { color: var(--muted); font-size: .8rem; text-transform:uppercase; letter-spacing:.04em; }
-  .badge { display:inline-block; padding: 2px 10px; border-radius: 999px; font-size:.78rem; font-weight:700; letter-spacing:.02em; }
-  .OK { color: var(--ok); background: var(--ok-bg); }
-  .WARNING { color: var(--warn); background: var(--warn-bg); }
-  .CRITICAL { color: var(--crit); background: var(--crit-bg); }
-  .INFO { color: var(--info); background: var(--info-bg); }
-  .UNKNOWN { color: var(--muted); background: rgba(127,127,127,.15); }
-  table { width:100%; border-collapse: collapse; font-size: .88rem; }
-  th, td { text-align:left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  th { color: var(--muted); font-weight:600; font-size:.76rem; text-transform:uppercase; letter-spacing:.03em; }
-  tr:hover td { background: rgba(127,127,127,.06); }
-  .tblwrap { overflow-x:auto; border:1px solid var(--border); border-radius:10px; }
-  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; }
-  pre { background: var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; overflow-x:auto; white-space:pre-wrap; }
-  details { background: var(--panel); border:1px solid var(--border); border-radius:10px; padding: 10px 14px; margin: 10px 0; }
-  summary { cursor:pointer; font-weight:600; }
-  summary .badge { margin-left:6px; font-weight:600; }
-  details > .tblwrap, details > p.note { margin-top:10px; }
-  .note { color: var(--muted); font-size:.88rem; }
-  ul.checklist { list-style:none; padding-left:0; }
-  ul.checklist li::before { content:"\2610\0020"; }
-  footer { margin-top:40px; color:var(--muted); font-size:.78rem; text-align:center; }
-  .kv { display:grid; grid-template-columns: 160px 1fr; gap:6px 12px; font-size:.9rem; }
-  .kv div:nth-child(odd) { color: var(--muted); }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-body); font-size: 14px; line-height: 1.5; }
+  a { color: var(--link); }
+  .masthead { background: var(--masthead); color: var(--masthead-text); border-top: 4px solid var(--accent); }
+  .masthead .inner { max-width: 1200px; margin: 0 auto; padding: 14px 24px; display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; }
+  .masthead h1 { font-family: var(--font-heading); font-size: 1.25rem; font-weight: 500; margin: 0; }
+  .masthead .sub { color: #c7c7c7; font-size: .85rem; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 24px 24px 60px; }
+  h2 { font-family: var(--font-heading); font-size: 1.25rem; font-weight: 500; margin: 40px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border-subtle); }
+  h3 { font-family: var(--font-heading); font-size: 1rem; font-weight: 500; margin: 16px 0 8px; }
+  .panel { background: var(--panel); border: 1px solid var(--border-subtle); border-radius: 16px; padding: 20px 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 8px; }
+  .stat { background: var(--panel); border: 1px solid var(--border-subtle); border-left: 4px solid var(--border); border-radius: 16px; padding: 14px 18px; }
+  .stat.CRITICAL { border-left-color: var(--crit); }
+  .stat.WARNING { border-left-color: var(--warn); }
+  .stat.INFO { border-left-color: var(--info); }
+  .stat .n { font-family: var(--font-heading); font-size: 1.75rem; font-weight: 500; }
+  .stat .l { color: var(--muted); font-size: .85rem; }
+  /* PatternFly filled label: pill, status tint, no border. Doubles as the
+     stat-card modifier above, hence the .badge scoping. */
+  .badge { display: inline-block; padding: 1px 10px; border-radius: 999px; font-size: .8rem; font-weight: 500; white-space: nowrap; }
+  .badge.OK { color: var(--ok-text); background: var(--ok-bg); }
+  .badge.WARNING { color: var(--warn-text); background: var(--warn-bg); }
+  .badge.CRITICAL { color: var(--crit-text); background: var(--crit-bg); }
+  .badge.INFO { color: var(--info-text); background: var(--info-bg); }
+  .badge.UNKNOWN { color: var(--unknown-text); background: var(--unknown-bg); }
+  .badge::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--muted); }
+  .badge.OK::before { background: var(--ok); }
+  .badge.WARNING::before { background: var(--warn); }
+  .badge.CRITICAL::before { background: var(--crit); }
+  .badge.INFO::before { background: var(--info); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); vertical-align: top; }
+  th { font-weight: 600; font-size: .85rem; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--hover); }
+  .tblwrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--border-subtle); border-radius: 16px; }
+  code, pre { font-family: var(--font-mono); font-size: .85rem; }
+  pre { background: var(--bg); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px; overflow-x: auto; white-space: pre-wrap; }
+  /* PatternFly accordion: chevron toggle that turns when expanded. */
+  details { background: var(--panel); border: 1px solid var(--border-subtle); border-radius: 16px; padding: 0; margin: 12px 0; }
+  summary { cursor: pointer; font-weight: 500; padding: 12px 16px; list-style: none; border-radius: 16px; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 12px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); vertical-align: 2px; transition: transform .15s; }
+  details[open] > summary::before { transform: rotate(45deg); vertical-align: 3px; }
+  summary:hover { background: var(--hover); }
+  details[open] > summary { border-bottom: 1px solid var(--border-subtle); border-radius: 16px 16px 0 0; }
+  summary .badge { margin-left: 6px; }
+  details > *:not(summary) { margin: 12px 16px; }
+  details > .tblwrap { border-radius: 6px; }
+  .note { color: var(--muted); font-size: .9rem; }
+  ul.checklist { list-style: none; padding-left: 0; }
+  ul.checklist li { padding: 2px 0; }
+  ul.checklist li::before { content: "\2610\0020"; color: var(--muted); }
+  footer { margin-top: 48px; color: var(--muted); font-size: .8rem; text-align: center; }
+  .kv { display: grid; grid-template-columns: 170px 1fr; gap: 8px 16px; }
+  .kv div:nth-child(odd) { color: var(--muted); font-weight: 500; }
   .kv code, .kv a { word-break: break-all; }
 </style>
 </head>
@@ -65,10 +108,11 @@
 {% macro sev_counts(rows) -%}
 {% for s in ['CRITICAL', 'WARNING', 'INFO', 'OK'] %}{% set n = rows | selectattr('severity', 'equalto', s) | list | length %}{% if n > 0 %}<span class="badge {{ s }}">{{ n ~ ' ' ~ s }}</span>{% endif %}{% endfor %}
 {%- endmacro %}
-<div class="wrap">
-
+<header class="masthead"><div class="inner">
   <h1>OpenShift Pre-Upgrade Health Check</h1>
-  <div class="sub">Generated {{ report_generated_at }} (UTC)</div>
+  <div class="sub">{{ cluster_name }} &middot; generated {{ report_generated_at }} (UTC)</div>
+</div></header>
+<div class="wrap">
 
   <div class="panel">
     <div class="kv">
@@ -83,9 +127,9 @@
   </div>
 
   <div class="grid" style="margin-top:16px;">
-    <div class="stat"><div class="n" style="color:var(--crit)">{{ critical_findings | length }}</div><div class="l">Critical</div></div>
-    <div class="stat"><div class="n" style="color:var(--warn)">{{ warning_findings | length }}</div><div class="l">Warning</div></div>
-    <div class="stat"><div class="n" style="color:var(--info)">{{ info_findings | length }}</div><div class="l">Info</div></div>
+    <div class="stat CRITICAL"><div class="n">{{ critical_findings | length }}</div><div class="l">Critical</div></div>
+    <div class="stat WARNING"><div class="n">{{ warning_findings | length }}</div><div class="l">Warning</div></div>
+    <div class="stat INFO"><div class="n">{{ info_findings | length }}</div><div class="l">Info</div></div>
     <div class="stat"><div class="n">{{ (critical_findings | length) + (warning_findings | length) + (info_findings | length) }}</div><div class="l">Total findings</div></div>
   </div>
 
