@@ -1,0 +1,131 @@
+---
+# Create (or update) the AAP 2.4 objects that run the health check:
+# a project for this repository, a localhost inventory, and a job template
+# with a survey (cluster, username, password, channel, target version).
+# Safe to re-run: each object is matched by name and updated in place.
+#
+# Settings: aap/vars.yml (placeholders marked CHANGE-ME).
+# Connection, from environment variables only - never put the token in a file
+# in this repository:
+#   export CONTROLLER_HOST=https://aap.example.com
+#   read -rsp 'AAP token: ' CONTROLLER_OAUTH_TOKEN; echo; export CONTROLLER_OAUTH_TOKEN
+#   export CONTROLLER_VERIFY_SSL=true      # the default; keep it on
+#   ansible-playbook aap/configure.yml -e @aap/vars.yml
+#   unset CONTROLLER_OAUTH_TOKEN
+# The token needs admin rights on aap_organization (AAP UI: Users > your
+# user > Tokens > Add, scope Write).
+#
+# Modules come from ansible.controller, which is in AAP's ee-supported
+# image. Outside it, `ansible-galaxy collection install awx.awx` gives the
+# same modules from public Galaxy - change the ansible.controller. prefix
+# below to awx.awx. to use them.
+- name: Configure AAP for the OpenShift pre-upgrade health check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  pre_tasks:
+    - name: Stop on unreplaced placeholders
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'CONTROLLER_HOST') | length > 0
+          - lookup('env', 'CONTROLLER_OAUTH_TOKEN') | length > 0
+          - _placeholders | length == 0
+        fail_msg: >-
+          Set CONTROLLER_HOST and CONTROLLER_OAUTH_TOKEN, and replace the CHANGE-ME
+          values in aap/vars.yml{{ (': ' ~ (_placeholders | join(', '))) if _placeholders else '' }}.
+        quiet: true
+      vars:
+        _placeholders: >-
+          {{ {'aap_organization': aap_organization, 'aap_scm_url': aap_scm_url, 'aap_clusters': aap_clusters | join(' ')}
+             | dict2items | selectattr('value', 'search', 'CHANGE-ME') | map(attribute='key') | list }}
+
+  tasks:
+    - name: Project (pulls this repository)
+      ansible.controller.project:
+        name: "{{ aap_project_name }}"
+        organization: "{{ aap_organization }}"
+        scm_type: git
+        scm_url: "{{ aap_scm_url }}"
+        scm_branch: "{{ aap_scm_branch }}"
+        scm_credential: "{{ aap_scm_credential if aap_scm_credential | length > 0 else omit }}"
+        scm_update_on_launch: true
+        default_environment: "{{ aap_execution_environment }}"
+        state: present
+        wait: true
+
+    - name: Inventory
+      ansible.controller.inventory:
+        name: "{{ aap_inventory_name }}"
+        organization: "{{ aap_organization }}"
+        description: localhost only - the playbook talks to clusters over their API
+        state: present
+
+    # Explicit localhost, so AAP runs the play with the EE's own Python.
+    - name: Inventory host localhost
+      ansible.controller.host:
+        name: localhost
+        inventory: "{{ aap_inventory_name }}"
+        variables:
+          ansible_connection: local
+          ansible_python_interpreter: !unsafe "{{ ansible_playbook_python }}"
+        state: present
+
+    - name: Job template with the launch survey
+      ansible.controller.job_template:
+        name: "{{ aap_job_template_name }}"
+        organization: "{{ aap_organization }}"
+        job_type: run
+        project: "{{ aap_project_name }}"
+        playbook: playbook.yml
+        inventory: "{{ aap_inventory_name }}"
+        execution_environment: "{{ aap_execution_environment }}"
+        extra_vars: "{{ aap_job_extra_vars }}"
+        survey_enabled: true
+        # Survey answers become extra vars. ocp_password is a Password field:
+        # stored encrypted, shown as $encrypted$ in job details, and the
+        # playbook only uses it in one no_log task (tasks/01_oauth_login.yml).
+        survey_spec:
+          name: OCP pre-upgrade health check
+          description: Cluster, OpenShift login and upgrade target for this run
+          spec:
+            - variable: ocp_api_host
+              question_name: Cluster
+              question_description: API URL of the cluster to check
+              type: multiplechoice
+              choices: "{{ aap_clusters }}"
+              default: "{{ aap_clusters | first }}"
+              required: true
+            - variable: ocp_username
+              question_name: OpenShift username
+              question_description: Leave blank to log in as your AAP user
+              type: text
+              default: ""
+              required: false
+              min: 0
+              max: 255
+            - variable: ocp_password
+              question_name: OpenShift password
+              question_description: Your current (short-lived) OpenShift password
+              type: password
+              default: ""
+              required: true
+              min: 1
+              max: 1024
+            - variable: upgrade_channel
+              question_name: Upgrade channel
+              question_description: eus targets the next even minor (EUS-to-EUS)
+              type: multiplechoice
+              choices: "{{ aap_upgrade_channels }}"
+              default: "{{ aap_default_upgrade_channel }}"
+              required: true
+            - variable: upgrade_target_version
+              question_name: Target version (optional)
+              question_description: Exact x.y.z to check, e.g. 4.20.34; blank uses the channel's latest
+              type: text
+              default: ""
+              required: false
+              min: 0
+              max: 32
+        ask_verbosity_on_launch: true
+        state: present

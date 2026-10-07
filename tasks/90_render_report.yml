@@ -78,6 +78,30 @@
       } | to_nice_json }}"
   delegate_to: localhost
 
+# Shows as the job's artifacts in AAP (Details page, API) and is passed to
+# later nodes of a workflow, e.g. to stop or notify on CRITICAL. Keyed by
+# cluster so one workflow running several clusters keeps them apart.
+# Outside AAP, set_stats only prints with show_custom_stats=true.
+- name: Publish the summary as AAP job artifacts (set_stats)
+  ansible.builtin.set_stats:
+    # One expression, so the cluster name works as a key and the counts
+    # stay numbers (a YAML key isn't templated; scalars come out as text).
+    data: "{{ {'ocp_preupgrade_health': {cluster_folder: {
+        'overall_status': overall_status,
+        'critical_count': critical_findings | length,
+        'warning_count': warning_findings | length,
+        'info_count': info_findings | length,
+        'current_version': current_version,
+        'upgrade_target_version': upgrade_target_version,
+        'upgrade_channel': upgrade_channel,
+        'cluster_id': cluster_id,
+        'report_generated_at': report_generated_at,
+        'report_basename': report_basename,
+        'critical_findings': critical_findings | map(attribute='summary') | list,
+      }}} }}"
+    per_host: false
+    aggregate: true
+
 - name: Console summary
   ansible.builtin.debug:
     msg:

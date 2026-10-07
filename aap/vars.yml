@@ -1,0 +1,39 @@
+---
+# Settings for aap/configure.yml. Every CHANGE-ME is a placeholder to replace
+# before the first run. No secrets here: the AAP host and token come from
+# environment variables (see the header of aap/configure.yml).
+
+# Existing AAP organization that will own the project and job template.
+aap_organization: CHANGE-ME-organization
+
+# --- Project: where AAP pulls this repository from ---------------------------
+aap_project_name: OCP pre-upgrade health check
+aap_scm_url: https://git.example.com/CHANGE-ME/ocp_preupgrade_health_check.git
+aap_scm_branch: main
+# Name of an existing Source Control credential for a private repo; "" for none.
+aap_scm_credential: ""
+
+# --- Execution environment ----------------------------------------------------
+# AAP 2.4's default EE (ee-supported-rhel8) has everything the playbook needs
+# (ansible-core 2.16, Jinja2 3.1, kubernetes.core, kubernetes client 29).
+aap_execution_environment: Default execution environment
+
+# --- Inventory: the playbook targets the controller-side localhost only -------
+aap_inventory_name: OCP pre-upgrade health check - localhost
+
+# --- Job template ---------------------------------------------------------------
+aap_job_template_name: OCP pre-upgrade health check
+
+# API URLs offered in the survey's cluster list. Placeholders - replace with
+# the real clusters (one entry each).
+aap_clusters:
+  - https://api.CHANGE-ME-cluster-1.example.com:6443
+  - https://api.CHANGE-ME-cluster-2.example.com:6443
+
+aap_upgrade_channels: [eus, stable, fast]
+aap_default_upgrade_channel: eus
+
+# Fixed extra vars for every launch (not asked in the survey).
+aap_job_extra_vars:
+  ocp_auth_method: password
+  ocp_validate_certs: true

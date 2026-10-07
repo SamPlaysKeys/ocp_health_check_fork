@@ -1,0 +1,59 @@
+---
+# ocp_auth_method=password: trade ocp_username/ocp_password for an OAuth
+# access token once, then run every task with that token.
+#
+# kubernetes.core's own username/password options send HTTP basic auth on
+# every API call, which the OpenShift 4 API server rejects - logins go
+# through the cluster's OAuth server (LDAP, htpasswd, ...). This is the same
+# exchange `oc login` and redhat.openshift.openshift_auth do, written with
+# ansible.builtin.uri so it needs no extra collection (redhat.openshift is
+# in the AAP EEs but not on public Galaxy; community.okd is the reverse).
+# The token is revoked at the end of the play (tasks/99_oauth_logout.yml).
+#
+# The password is only used by the authorize request below, which has
+# no_log so it can't reach the job output.
+
+- name: Discover the cluster's OAuth server
+  ansible.builtin.uri:
+    url: "{{ ocp_api_host | regex_replace('/+$', '') }}/.well-known/oauth-authorization-server"
+    validate_certs: "{{ ocp_validate_certs }}"
+    ca_path: "{{ ocp_ca_cert if ocp_ca_cert | length > 0 else omit }}"
+    return_content: true
+  register: _ocp_oauth_meta
+  delegate_to: localhost
+
+# openshift-challenging-client answers a basic-auth challenge with a 302
+# whose Location fragment carries the token; X-CSRF-Token is required by
+# the OAuth server for this client, any value works.
+- name: Log in to OpenShift as {{ ocp_login_username }} (OAuth token request)
+  ansible.builtin.uri:
+    url: "{{ _ocp_oauth_meta.json.authorization_endpoint }}?response_type=token&client_id=openshift-challenging-client"
+    url_username: "{{ ocp_login_username }}"
+    url_password: "{{ ocp_password }}"
+    force_basic_auth: true
+    follow_redirects: none
+    headers:
+      X-CSRF-Token: "1"
+    validate_certs: "{{ ocp_validate_certs }}"
+    ca_path: "{{ ocp_ca_cert if ocp_ca_cert | length > 0 else omit }}"
+    status_code: [302, 401]
+  register: _ocp_oauth_authorize
+  no_log: true
+  delegate_to: localhost
+
+- name: Stop if the OpenShift login was rejected
+  ansible.builtin.assert:
+    that:
+      - _ocp_oauth_authorize.status == 302
+      - (_ocp_oauth_authorize.location | default('')) is search('access_token=')
+    fail_msg: >-
+      OpenShift login as {{ ocp_login_username }} at {{ ocp_api_host }} failed
+      (HTTP {{ _ocp_oauth_authorize.status }}): check the username and password -
+      a short-lived password may have expired.
+    quiet: true
+
+- name: Keep the OAuth token for this run
+  ansible.builtin.set_fact:
+    # Tokens are sha256~<base64url>, so nothing in them needs URL-decoding.
+    ocp_oauth_token: "{{ _ocp_oauth_authorize.location | regex_search('access_token=([^&]+)', '\\1') | first }}"
+  no_log: true

@@ -14,7 +14,7 @@ Everything a run writes goes into one folder per cluster,
 `reports/` holds these reports plus `*.status.json`, and `operators/` holds
 the operator and catalog outputs described below. `<cluster>`
 is the cluster's `status.infrastructureName` without the random suffix the
-installer appends (`nam-d3m-03-nvmmf-x7k2p` -> `nam-d3m-03-nvmmf`), or the
+installer appends (`example-01-abcde-x7k2p` -> `example-01-abcde`), or the
 short cluster ID when the name can't be read. The JSON outputs
 (`cluster_operators_installed.json`, `catalog_mirror_check.json`,
 `*.status.json`) carry the same value as a top-level `"cluster_name"`.
@@ -196,16 +196,28 @@ ansible-playbook playbook.yml -e ocp_auth_method=token \
   -e ocp_api_host=https://api.mycluster.example.com:6443 \
   -e ocp_api_token="$(oc whoami -t)"
 
-# 3. username/password (basic auth / htpasswd identity provider)
+# 3. username/password (any identity provider: LDAP, htpasswd, ...)
+read -rsp 'OpenShift password: ' OCP_PASSWORD; echo; export OCP_PASSWORD
 ansible-playbook playbook.yml -e ocp_auth_method=password \
   -e ocp_api_host=https://api.mycluster.example.com:6443 \
-  -e ocp_username=admin -e ocp_password="$MY_PASSWORD"
+  -e ocp_username=jdoe
+unset OCP_PASSWORD
 ```
 
 Never commit real tokens/passwords - pass them with `-e`, `--vault-id`, or an
-environment-backed lookup. All three methods are handled by the
-`kubernetes.core` collection directly (see `tasks/00_facts.yml`); this
-playbook doesn't shell out to `oc login`.
+environment-backed lookup. kubeconfig and token are handed to the
+`kubernetes.core` collection directly (see `tasks/00_facts.yml`). The
+password method logs in like `oc login` does: `tasks/01_oauth_login.yml`
+trades the username/password for an OAuth token once (the OpenShift API
+server itself doesn't accept passwords), every task then uses the token, and
+`tasks/99_oauth_logout.yml` revokes it at the end, even when the run fails.
+`ocp_password` defaults to the `OCP_PASSWORD` environment variable, so the
+password stays out of the command line (`ps`) and shell history; in AAP,
+pass it from a Password-type survey field.
+
+At the end of every run the summary (overall status, counts, CRITICAL
+findings) is published with `set_stats` under `ocp_preupgrade_health.<cluster>`:
+in AAP it shows as the job's artifacts and reaches later workflow nodes.
 
 ## Running it
 
@@ -451,7 +463,7 @@ data dump for downstream tooling, in exactly this shape and no other keys:
 
 ```json
 {
-  "cluster_name": "nam-d3m-03-nvmmf",
+  "cluster_name": "example-01-abcde",
   "cluster": { "current": "4.18.14", "target": "4.20.32", "channel": "EUS" },
   "operators": [
     { "name": "cluster-logging", "channel": "stable-6.2", "version": "6.2.0",
@@ -633,7 +645,7 @@ What the check reports:
 
   ```json
   {
-    "cluster_name": "nam-d3m-03-nvmmf",
+    "cluster_name": "example-01-abcde",
     "cluster": {"current": "4.18.14", "target": "4.20.34", "channel": "eus",
                 "ocp_path": ["4.18", "4.19", "4.20"],
                 "upgrade_path": ["4.18.14", "4.18.30", "4.19.33", "4.20.34"]},

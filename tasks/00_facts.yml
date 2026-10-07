@@ -52,12 +52,16 @@
     that:
       - ocp_auth_method in ['kubeconfig', 'token', 'password']
       - (ocp_auth_method != 'token') or (ocp_api_host | length > 0 and ocp_api_token | length > 0)
-      - (ocp_auth_method != 'password') or (ocp_api_host | length > 0 and ocp_username | length > 0 and ocp_password | length > 0)
+      - (ocp_auth_method != 'password') or (ocp_api_host | length > 0 and ocp_login_username | length > 0 and ocp_password | length > 0)
     fail_msg: >-
       ocp_auth_method={{ ocp_auth_method }} is missing its required variables.
-      token needs ocp_api_host + ocp_api_token; password needs ocp_api_host + ocp_username + ocp_password;
+      token needs ocp_api_host + ocp_api_token; password needs ocp_api_host + ocp_username (or an AAP launch) + ocp_password;
       kubeconfig needs ocp_kubeconfig to point at a readable file.
     quiet: true
+
+- name: Log in with ocp_username/ocp_password (password method only)
+  ansible.builtin.include_tasks: tasks/01_oauth_login.yml
+  when: ocp_auth_method == 'password'
 
 - name: Build raw connection parameters for the selected auth method
   ansible.builtin.set_fact:
@@ -74,16 +78,19 @@
         api_key: "{{ ocp_api_token }}"
         validate_certs: "{{ ocp_validate_certs }}"
         ca_cert: "{{ ocp_ca_cert }}"
+      # The token tasks/01_oauth_login.yml got for ocp_username/ocp_password:
+      # the API server doesn't take the password itself.
       password:
         host: "{{ ocp_api_host }}"
-        username: "{{ ocp_username }}"
-        password: "{{ ocp_password }}"
+        api_key: "{{ ocp_oauth_token | default('') }}"
         validate_certs: "{{ ocp_validate_certs }}"
         ca_cert: "{{ ocp_ca_cert }}"
+  no_log: true  # holds the API token
 
 - name: Strip empty connection parameters (so module defaults fall back sanely)
   ansible.builtin.set_fact:
     k8s_conn: "{{ _raw_k8s_conn | dict2items | rejectattr('value', 'equalto', '') | list | items2dict }}"
+  no_log: true  # holds the API token
 
 - name: Record report timestamp
   ansible.builtin.set_fact:

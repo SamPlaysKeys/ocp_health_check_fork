@@ -126,9 +126,9 @@ for chk in ceph_status_report_data["checks"]:
 context = dict(
     cluster_id=fx.CLUSTERVERSION["spec"]["clusterID"],
     cluster_id_short=fx.CLUSTERVERSION["spec"]["clusterID"][:8],
-    cluster_name="ocp5-preprod-a1b2c",
-    cluster_api_url="https://api.ocp5.example.com:6443",
-    cluster_console_url="https://console-openshift-console.apps.ocp5.example.com",
+    cluster_name="lab1-preprod-a1b2c",
+    cluster_api_url="https://api.lab1.example.com:6443",
+    cluster_console_url="https://console-openshift-console.apps.lab1.example.com",
     current_version=fx.CLUSTERVERSION["status"]["desired"]["version"],
     current_channel=fx.CLUSTERVERSION["spec"]["channel"],
     upgrade_target_version="4.17.14",

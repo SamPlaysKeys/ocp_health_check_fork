@@ -19,9 +19,16 @@ ocp_context: ""                     # optional: a specific context name inside t
 ocp_api_host: ""                    # e.g. https://api.mycluster.example.com:6443
 ocp_api_token: ""                   # pass with -e ocp_api_token=... or via vault, do not commit
 
-# --- username/password method (basic auth / htpasswd identity provider) -----
+# --- username/password method (any OpenShift identity provider: LDAP, htpasswd, ...)
+# Exchanged once for an OAuth token (tasks/01_oauth_login.yml), revoked at the
+# end of the run. In AAP pass ocp_password from a Password survey field; on the
+# command line export OCP_PASSWORD instead of -e, which shows in `ps`.
 ocp_username: ""
-ocp_password: ""
+ocp_password: "{{ lookup('env', 'OCP_PASSWORD') }}"
+# Who actually logs in: ocp_username, or when that's blank (e.g. an empty AAP
+# survey answer) the AAP user who launched the job, which AAP passes as
+# awx_user_name - same identity when AAP and OpenShift share the directory.
+ocp_login_username: "{{ ocp_username if ocp_username | length > 0 else (awx_user_name | default('')) }}"
 
 # --- shared TLS options -------------------------------------------------------
 ocp_validate_certs: true
@@ -320,7 +327,7 @@ catalog_default_sources:
 # .status.json) and operators/ (operator snapshot, catalog renders,
 # catalog_mirror_check.json). cluster_folder is the
 # cluster's infrastructureName without the installer's random suffix
-# (nam-d3m-03-nvmmf-x7k2p -> nam-d3m-03-nvmmf), or the short cluster ID when
+# (example-01-abcde-x7k2p -> example-01-abcde), or the short cluster ID when
 # the name can't be read. The JSON outputs carry it as "cluster_name".
 cluster_folder: "{{ cluster_name | default('unknown') | cluster_folder_name(cluster_id_short | default('cluster')) }}"
 cluster_output_dir: "{{ playbook_dir }}/outputs/{{ cluster_folder }}"
